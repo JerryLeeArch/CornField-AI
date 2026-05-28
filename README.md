@@ -1,9 +1,10 @@
-# CornField
+# CornField AI
 
-CornField is a local-first browser video player for personal libraries.  
-It keeps your original files on disk, stores app state locally, and gives you a fast browser UI for browsing, tagging, rating, and watching your own video library.
+CornField AI is a local-first browser video player for personal libraries.
 
-No sample media is bundled in this repository. You point CornField at your own video folder on first use.
+It keeps your original files on disk, stores app state locally, and gives you a fast browser UI for browsing, tagging, rating, watching, and summarizing your own video library preferences.
+
+No sample media is bundled in this repository. You point CornField AI at your own video folder on first use.
 
 ## Requirements
 
@@ -25,7 +26,7 @@ It will:
 1. Open the official Node.js download page if Node.js is missing
 2. Install dependencies on first run
 3. Start the local server
-4. Open CornField in your browser
+4. Open CornField AI in your browser
 
 On Windows, no extra permission step is usually needed for `openCornField.cmd`.
 
@@ -41,7 +42,7 @@ On Windows, no extra permission step is usually needed for `openCornField.cmd`.
 - Missing files are removed from DB on scan
 - Unused tags and starring entries are cleaned up automatically
 - Files starting with `._` are ignored during scan/listing
-- For newly added videos without a thumbnail, CornField tries to capture a frame near the middle of the video
+- For newly added videos without a thumbnail, CornField AI tries to capture a frame near the middle of the video
 
 ## Features
 
@@ -55,6 +56,14 @@ On Windows, no extra permission step is usually needed for `openCornField.cmd`.
 - Upload, capture, or auto-generate thumbnails
 - Hover the player seek bar to preview nearby frames
 - Use keyboard shortcuts and persistent player preferences
+- Track watch sessions locally for preference analysis
+- Generate a simple AI preference summary from your local viewing signals
+
+## AI Setup
+
+CornField AI does not bundle an AI account or API key. Add your own OpenAI-compatible API key in Settings, or launch with `AI_API_KEY`, `AI_BASE_URL`, and `AI_MODEL` environment variables.
+
+The app stores a Settings key locally in `data/videoplayer.db`. Only library metadata and viewing signals used for the summary are sent to the configured AI API when you click Generate Summary.
 
 ## Technical Notes
 
@@ -99,6 +108,7 @@ Open: [http://127.0.0.1:4300](http://127.0.0.1:4300)
 ### API Overview
 
 - `GET /api/settings`, `PUT /api/settings`
+- `GET /api/for-you/insights`, `POST /api/ai/preference-summary`
 - `POST /api/library/scan/preview`, `POST /api/library/scan`
 - `GET /api/videos`, `GET /api/videos/admin`, `GET /api/videos/:id`
 - `PUT /api/videos/:id/metadata`
@@ -110,6 +120,7 @@ Open: [http://127.0.0.1:4300](http://127.0.0.1:4300)
 - `POST /api/videos/:id/thumbnail/upload`
 - `POST /api/videos/:id/thumbnail/capture`
 - `GET /api/videos/:id/previews`
+- `POST /api/videos/:id/watch-sessions`, `POST /api/watch-sessions/:id/progress`
 - `GET /api/videos/:id/related`
 - `GET /api/tags`, `GET /api/starrings`
 - `GET /media/*` (video streaming)

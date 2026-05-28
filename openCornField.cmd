@@ -36,7 +36,7 @@ if defined NEED_INSTALL (
   if errorlevel 1 exit /b 1
 )
 
-echo Starting CornField...
+echo Starting CornField AI...
 start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$url = '%APP_URL%'; for ($i = 0; $i -lt 60; $i++) { try { Invoke-WebRequest -Uri $url -UseBasicParsing | Out-Null; Start-Process $url; exit 0 } catch { Start-Sleep -Milliseconds 500 } }; Start-Process $url"
 echo Keep this window open while using the app.
 call npm run start

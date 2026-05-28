@@ -1,7 +1,7 @@
 {
-  "name": "cornfield",
+  "name": "cornfield-ai",
   "version": "0.1.0",
-  "description": "Local browser video player with metadata, comments, and filtering",
+  "description": "Local browser video player with AI preference summaries, metadata, comments, and filtering",
   "type": "module",
   "main": "src/server.js",
   "scripts": {

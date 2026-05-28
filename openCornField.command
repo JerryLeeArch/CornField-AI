@@ -27,7 +27,7 @@ if [ ! -d "node_modules" ] || [ ! -d "node_modules/ffmpeg-static" ]; then
   npm install
 fi
 
-echo "Starting CornField..."
+echo "Starting CornField AI..."
 npm run start &
 SERVER_PID=$!
 
@@ -51,7 +51,7 @@ done
 if [ "$READY" -eq 1 ]; then
   open "$APP_URL"
 else
-  echo "CornField is still starting. Open $APP_URL manually in your browser."
+  echo "CornField AI is still starting. Open $APP_URL manually in your browser."
 fi
 
 echo "Keep this terminal open while using the app."

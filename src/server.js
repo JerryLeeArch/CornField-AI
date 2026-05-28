@@ -181,6 +181,45 @@ function parseRating(value, fallback = null) {
   return rating;
 }
 
+function parseNonNegativeNumber(value, fallback = 0) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return fallback;
+  }
+
+  return parsed;
+}
+
+function clampRatio(value, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.max(0, Math.min(1, parsed));
+}
+
+function getPublicSettings() {
+  const settings = getSettingsObject();
+  const hasSettingsKey = Boolean(String(settings.aiApiKey || '').trim());
+  const hasEnvKey = Boolean(String(process.env.AI_API_KEY || '').trim());
+
+  return {
+    libraryRoot: settings.libraryRoot || '',
+    skipSeconds: Number(settings.skipSeconds || 10),
+    libraryRows: Number(settings.libraryRows || 3),
+    controlsHideMs: Number(settings.controlsHideMs || 2500),
+    aiApiBaseUrl: settings.aiApiBaseUrl || process.env.AI_BASE_URL || 'https://api.openai.com/v1',
+    aiModel: settings.aiModel || process.env.AI_MODEL || '',
+    aiApiKeyConfigured: hasSettingsKey || hasEnvKey,
+    aiApiKeySource: hasSettingsKey ? 'settings' : hasEnvKey ? 'environment' : ''
+  };
+}
+
 function toAppleScriptString(value) {
   return `"${String(value).replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
@@ -366,6 +405,38 @@ function serializeVideoRow(row) {
   };
 }
 
+function serializeInsightVideoRow(row) {
+  return {
+    id: row.id,
+    displayTitle: row.displayTitle,
+    category: row.category || '',
+    duration: Number(row.duration || 0),
+    qualityBucket: row.qualityBucket || 'unknown',
+    thumbnailPath: row.thumbnailPath || '',
+    viewCount: Number(row.viewCount || 0),
+    sessions: Number(row.sessions || 0),
+    watchedSeconds: Number(row.watchedSeconds || 0),
+    completionRatio: clampRatio(row.completionRatio, 0),
+    lastWatchedAt: row.lastWatchedAt || null,
+    averageRating: row.ratingCount > 0 ? Number(row.averageRating) : null,
+    ratingCount: Number(row.ratingCount || 0),
+    tags: row.tagsCsv ? row.tagsCsv.split(',').filter(Boolean) : [],
+    starrings: row.starringsCsv ? row.starringsCsv.split(',').filter(Boolean) : []
+  };
+}
+
+function serializeRankedSignalRow(row) {
+  return {
+    name: row.name || '',
+    videoCount: Number(row.videoCount || 0),
+    watchedVideoCount: Number(row.watchedVideoCount || 0),
+    sessions: Number(row.sessions || 0),
+    watchedSeconds: Number(row.watchedSeconds || 0),
+    views: Number(row.views || 0),
+    averageRating: row.averageRating === null || row.averageRating === undefined ? null : Number(row.averageRating)
+  };
+}
+
 function parsePreviewDirectoryVideoId(dirName) {
   const match = /^video-(\d+)$/.exec(String(dirName || ''));
   if (!match) {
@@ -475,6 +546,8 @@ async function buildDatabaseSummary() {
         (SELECT COUNT(DISTINCT category) FROM videos WHERE file_name NOT LIKE '._%' AND is_missing = 0 AND TRIM(category) <> '') AS category_count,
         (SELECT COALESCE(SUM(duration), 0) FROM videos WHERE file_name NOT LIKE '._%' AND is_missing = 0) AS total_duration_sec,
         (SELECT COALESCE(SUM(view_count), 0) FROM videos WHERE file_name NOT LIKE '._%' AND is_missing = 0) AS total_views,
+        (SELECT COUNT(*) FROM watch_sessions ws JOIN videos v ON v.id = ws.video_id WHERE v.file_name NOT LIKE '._%' AND v.is_missing = 0) AS watch_session_count,
+        (SELECT COALESCE(SUM(ws.watched_seconds), 0) FROM watch_sessions ws JOIN videos v ON v.id = ws.video_id WHERE v.file_name NOT LIKE '._%' AND v.is_missing = 0) AS total_watched_sec,
         (SELECT COUNT(*) FROM tags) AS tag_count,
         (SELECT COUNT(*) FROM starrings) AS starring_count,
         (SELECT COUNT(*) FROM comments) AS comment_count,
@@ -559,6 +632,8 @@ async function buildDatabaseSummary() {
       categoryCount: Number(overview?.category_count || 0),
       totalDurationSec: Number(overview?.total_duration_sec || 0),
       totalViews: Number(overview?.total_views || 0),
+      watchSessionCount: Number(overview?.watch_session_count || 0),
+      totalWatchedSec: Number(overview?.total_watched_sec || 0),
       tagCount: Number(overview?.tag_count || 0),
       starringCount: Number(overview?.starring_count || 0),
       commentCount: Number(overview?.comment_count || 0),
@@ -579,6 +654,388 @@ async function buildDatabaseSummary() {
       previews: samplePreviews
     }
   };
+}
+
+function buildForYouInsights() {
+  const activeVideoWhere = "v.is_missing = 0 AND v.file_name NOT LIKE '._%'";
+  const overview = db
+    .prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM videos v WHERE ${activeVideoWhere}) AS totalVideos,
+        (SELECT COUNT(*)
+         FROM watch_sessions ws
+         JOIN videos v ON v.id = ws.video_id
+         WHERE ${activeVideoWhere}) AS watchSessionCount,
+        (SELECT COUNT(DISTINCT ws.video_id)
+         FROM watch_sessions ws
+         JOIN videos v ON v.id = ws.video_id
+         WHERE ${activeVideoWhere}) AS watchedVideoCount,
+        (SELECT COALESCE(SUM(ws.watched_seconds), 0)
+         FROM watch_sessions ws
+         JOIN videos v ON v.id = ws.video_id
+         WHERE ${activeVideoWhere}) AS totalWatchedSeconds,
+        (SELECT COALESCE(AVG(ws.completion_ratio), 0)
+         FROM watch_sessions ws
+         JOIN videos v ON v.id = ws.video_id
+         WHERE ${activeVideoWhere} AND ws.media_duration_sec > 0) AS averageCompletionRatio,
+        (SELECT COALESCE(MAX(ws.updated_at), '')
+         FROM watch_sessions ws
+         JOIN videos v ON v.id = ws.video_id
+         WHERE ${activeVideoWhere}) AS lastWatchedAt,
+        (SELECT COUNT(*) FROM comments c JOIN videos v ON v.id = c.video_id WHERE ${activeVideoWhere} AND c.rated_at IS NOT NULL) AS ratingCount,
+        (SELECT COUNT(DISTINCT c.video_id) FROM comments c JOIN videos v ON v.id = c.video_id WHERE ${activeVideoWhere} AND c.rated_at IS NOT NULL) AS ratedVideoCount,
+        (SELECT AVG(c.rating) FROM comments c JOIN videos v ON v.id = c.video_id WHERE ${activeVideoWhere} AND c.rated_at IS NOT NULL) AS averageRating,
+        (SELECT COUNT(*) FROM timeline_notes n JOIN videos v ON v.id = n.video_id WHERE ${activeVideoWhere}) AS noteCount,
+        (SELECT COALESCE(SUM(v.view_count), 0) FROM videos v WHERE ${activeVideoWhere}) AS totalViews
+    `)
+    .get();
+
+  const signalCtes = `
+    WITH video_watch AS (
+      SELECT
+        video_id,
+        COUNT(*) AS sessions,
+        COALESCE(SUM(watched_seconds), 0) AS watched_seconds,
+        COALESCE(MAX(completion_ratio), 0) AS completion_ratio,
+        COALESCE(MAX(updated_at), '') AS last_watched_at
+      FROM watch_sessions
+      GROUP BY video_id
+    ),
+    video_rating AS (
+      SELECT
+        video_id,
+        AVG(rating) AS average_rating,
+        COUNT(*) AS rating_count
+      FROM comments
+      WHERE rated_at IS NOT NULL
+      GROUP BY video_id
+    )
+  `;
+
+  const topTags = db
+    .prepare(`
+      ${signalCtes}
+      SELECT
+        t.name AS name,
+        COUNT(DISTINCT v.id) AS videoCount,
+        COUNT(DISTINCT CASE WHEN COALESCE(vw.sessions, 0) > 0 THEN v.id END) AS watchedVideoCount,
+        COALESCE(SUM(COALESCE(vw.sessions, 0)), 0) AS sessions,
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) AS watchedSeconds,
+        COALESCE(SUM(v.view_count), 0) AS views,
+        AVG(vr.average_rating) AS averageRating
+      FROM tags t
+      JOIN video_tags vt ON vt.tag_id = t.id
+      JOIN videos v ON v.id = vt.video_id
+      LEFT JOIN video_watch vw ON vw.video_id = v.id
+      LEFT JOIN video_rating vr ON vr.video_id = v.id
+      WHERE ${activeVideoWhere}
+      GROUP BY t.id
+      HAVING
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) > 0
+        OR COALESCE(SUM(v.view_count), 0) > 0
+        OR AVG(vr.average_rating) IS NOT NULL
+      ORDER BY watchedSeconds DESC, averageRating DESC, views DESC, videoCount DESC, name ASC
+      LIMIT 12
+    `)
+    .all()
+    .map(serializeRankedSignalRow);
+
+  const topCategories = db
+    .prepare(`
+      ${signalCtes}
+      SELECT
+        v.category AS name,
+        COUNT(DISTINCT v.id) AS videoCount,
+        COUNT(DISTINCT CASE WHEN COALESCE(vw.sessions, 0) > 0 THEN v.id END) AS watchedVideoCount,
+        COALESCE(SUM(COALESCE(vw.sessions, 0)), 0) AS sessions,
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) AS watchedSeconds,
+        COALESCE(SUM(v.view_count), 0) AS views,
+        AVG(vr.average_rating) AS averageRating
+      FROM videos v
+      LEFT JOIN video_watch vw ON vw.video_id = v.id
+      LEFT JOIN video_rating vr ON vr.video_id = v.id
+      WHERE ${activeVideoWhere} AND TRIM(v.category) <> ''
+      GROUP BY v.category
+      HAVING
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) > 0
+        OR COALESCE(SUM(v.view_count), 0) > 0
+        OR AVG(vr.average_rating) IS NOT NULL
+      ORDER BY watchedSeconds DESC, averageRating DESC, views DESC, videoCount DESC, name ASC
+      LIMIT 10
+    `)
+    .all()
+    .map(serializeRankedSignalRow);
+
+  const topStarrings = db
+    .prepare(`
+      ${signalCtes}
+      SELECT
+        s.name AS name,
+        COUNT(DISTINCT v.id) AS videoCount,
+        COUNT(DISTINCT CASE WHEN COALESCE(vw.sessions, 0) > 0 THEN v.id END) AS watchedVideoCount,
+        COALESCE(SUM(COALESCE(vw.sessions, 0)), 0) AS sessions,
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) AS watchedSeconds,
+        COALESCE(SUM(v.view_count), 0) AS views,
+        AVG(vr.average_rating) AS averageRating
+      FROM starrings s
+      JOIN video_starrings vs ON vs.starring_id = s.id
+      JOIN videos v ON v.id = vs.video_id
+      LEFT JOIN video_watch vw ON vw.video_id = v.id
+      LEFT JOIN video_rating vr ON vr.video_id = v.id
+      WHERE ${activeVideoWhere}
+      GROUP BY s.id
+      HAVING
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) > 0
+        OR COALESCE(SUM(v.view_count), 0) > 0
+        OR AVG(vr.average_rating) IS NOT NULL
+      ORDER BY watchedSeconds DESC, averageRating DESC, views DESC, videoCount DESC, name ASC
+      LIMIT 10
+    `)
+    .all()
+    .map(serializeRankedSignalRow);
+
+  const durationBuckets = db
+    .prepare(`
+      ${signalCtes}
+      SELECT
+        CASE
+          WHEN v.duration <= 0 THEN 'Unknown'
+          WHEN v.duration > 0 AND v.duration < 600 THEN 'Under 10m'
+          WHEN v.duration < 1800 THEN '10-30m'
+          WHEN v.duration < 3600 THEN '30-60m'
+          ELSE '60m+'
+        END AS name,
+        CASE
+          WHEN v.duration <= 0 THEN 0
+          WHEN v.duration > 0 AND v.duration < 600 THEN 1
+          WHEN v.duration < 1800 THEN 2
+          WHEN v.duration < 3600 THEN 3
+          ELSE 4
+        END AS bucketOrder,
+        COUNT(DISTINCT v.id) AS videoCount,
+        COUNT(DISTINCT CASE WHEN COALESCE(vw.sessions, 0) > 0 THEN v.id END) AS watchedVideoCount,
+        COALESCE(SUM(COALESCE(vw.sessions, 0)), 0) AS sessions,
+        COALESCE(SUM(COALESCE(vw.watched_seconds, 0)), 0) AS watchedSeconds,
+        COALESCE(SUM(v.view_count), 0) AS views,
+        AVG(vr.average_rating) AS averageRating
+      FROM videos v
+      LEFT JOIN video_watch vw ON vw.video_id = v.id
+      LEFT JOIN video_rating vr ON vr.video_id = v.id
+      WHERE ${activeVideoWhere}
+      GROUP BY name, bucketOrder
+      ORDER BY bucketOrder ASC
+    `)
+    .all()
+    .map(serializeRankedSignalRow);
+
+  const videoSelect = `
+    SELECT
+      v.id,
+      v.display_title AS displayTitle,
+      v.category,
+      v.duration,
+      v.quality_bucket AS qualityBucket,
+      v.thumbnail_path AS thumbnailPath,
+      v.view_count AS viewCount,
+      COALESCE(vw.sessions, 0) AS sessions,
+      COALESCE(vw.watched_seconds, 0) AS watchedSeconds,
+      COALESCE(vw.completion_ratio, 0) AS completionRatio,
+      NULLIF(vw.last_watched_at, '') AS lastWatchedAt,
+      vr.average_rating AS averageRating,
+      COALESCE(vr.rating_count, 0) AS ratingCount,
+      GROUP_CONCAT(DISTINCT t.name) AS tagsCsv,
+      GROUP_CONCAT(DISTINCT s.name) AS starringsCsv
+    FROM videos v
+    LEFT JOIN video_watch vw ON vw.video_id = v.id
+    LEFT JOIN video_rating vr ON vr.video_id = v.id
+    LEFT JOIN video_tags vt ON vt.video_id = v.id
+    LEFT JOIN tags t ON t.id = vt.tag_id
+    LEFT JOIN video_starrings vs ON vs.video_id = v.id
+    LEFT JOIN starrings s ON s.id = vs.starring_id
+    WHERE ${activeVideoWhere}
+  `;
+
+  const recentlyWatched = db
+    .prepare(`
+      ${signalCtes}
+      ${videoSelect}
+      GROUP BY v.id
+      HAVING sessions > 0
+      ORDER BY lastWatchedAt DESC, v.id DESC
+      LIMIT 12
+    `)
+    .all()
+    .map(serializeInsightVideoRow);
+
+  const topWatchedVideos = db
+    .prepare(`
+      ${signalCtes}
+      ${videoSelect}
+      GROUP BY v.id
+      HAVING watchedSeconds > 0 OR sessions > 0
+      ORDER BY watchedSeconds DESC, completionRatio DESC, sessions DESC, v.view_count DESC
+      LIMIT 12
+    `)
+    .all()
+    .map(serializeInsightVideoRow);
+
+  const topRatedVideos = db
+    .prepare(`
+      ${signalCtes}
+      ${videoSelect}
+      GROUP BY v.id
+      HAVING ratingCount > 0
+      ORDER BY averageRating DESC, ratingCount DESC, watchedSeconds DESC, v.view_count DESC
+      LIMIT 12
+    `)
+    .all()
+    .map(serializeInsightVideoRow);
+
+  return {
+    generatedAt: isoNow(),
+    overview: {
+      totalVideos: Number(overview.totalVideos || 0),
+      watchSessionCount: Number(overview.watchSessionCount || 0),
+      watchedVideoCount: Number(overview.watchedVideoCount || 0),
+      totalWatchedSeconds: Number(overview.totalWatchedSeconds || 0),
+      averageCompletionRatio: clampRatio(overview.averageCompletionRatio, 0),
+      lastWatchedAt: overview.lastWatchedAt || null,
+      ratingCount: Number(overview.ratingCount || 0),
+      ratedVideoCount: Number(overview.ratedVideoCount || 0),
+      averageRating: overview.averageRating === null || overview.averageRating === undefined ? null : Number(overview.averageRating),
+      noteCount: Number(overview.noteCount || 0),
+      totalViews: Number(overview.totalViews || 0)
+    },
+    topTags,
+    topCategories,
+    topStarrings,
+    durationBuckets,
+    recentlyWatched,
+    topWatchedVideos,
+    topRatedVideos
+  };
+}
+
+function getAiConfig() {
+  const settings = getSettingsObject();
+  return {
+    apiKey: String(settings.aiApiKey || process.env.AI_API_KEY || '').trim(),
+    baseUrl: String(settings.aiApiBaseUrl || process.env.AI_BASE_URL || 'https://api.openai.com/v1').trim().replace(/\/+$/, ''),
+    model: String(settings.aiModel || process.env.AI_MODEL || '').trim()
+  };
+}
+
+function getChatCompletionsUrl(baseUrl) {
+  const normalized = String(baseUrl || '').trim().replace(/\/+$/, '');
+  if (!normalized) {
+    return '';
+  }
+
+  return normalized.endsWith('/chat/completions') ? normalized : `${normalized}/chat/completions`;
+}
+
+function buildPreferenceSummaryMessages(insights, language = '') {
+  const outputLanguage = String(language || '').toLowerCase().startsWith('ko') ? 'Korean' : 'English';
+  const compactInsights = {
+    overview: insights.overview,
+    topTags: insights.topTags.slice(0, 10),
+    topCategories: insights.topCategories.slice(0, 8),
+    topStarrings: insights.topStarrings.slice(0, 8),
+    durationBuckets: insights.durationBuckets,
+    recentlyWatched: insights.recentlyWatched.slice(0, 8),
+    topWatchedVideos: insights.topWatchedVideos.slice(0, 8),
+    topRatedVideos: insights.topRatedVideos.slice(0, 8)
+  };
+
+  return [
+    {
+      role: 'system',
+      content:
+        'You analyze a private local video library from metadata and watch signals. Summarize preferences only from the provided data. Do not infer sensitive traits, identities, or anything not present in the data. Be concise, practical, and specific.'
+    },
+    {
+      role: 'user',
+      content: `Write in ${outputLanguage}. Create a preference summary with:
+- 3-5 short observations about what the user seems to prefer
+- signals that support those observations
+- 2-3 ideas for what they may want to watch or tag next, without inventing unavailable titles
+
+Data:
+${JSON.stringify(compactInsights, null, 2)}`
+    }
+  ];
+}
+
+async function generatePreferenceSummary(insights, { language = '' } = {}) {
+  const config = getAiConfig();
+  if (!config.apiKey) {
+    const error = new Error('AI API key is not configured.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  if (!config.model) {
+    const error = new Error('AI model is not configured.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const url = getChatCompletionsUrl(config.baseUrl);
+  if (!url) {
+    const error = new Error('AI API base URL is not configured.');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45000);
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: config.model,
+        messages: buildPreferenceSummaryMessages(insights, language),
+        temperature: 0.25,
+        max_tokens: 700
+      }),
+      signal: controller.signal
+    });
+
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const providerMessage = payload?.error?.message || payload?.message || response.statusText;
+      const error = new Error(`AI request failed: ${providerMessage}`);
+      error.statusCode = response.status;
+      throw error;
+    }
+
+    const summary = payload?.choices?.[0]?.message?.content;
+    if (!summary) {
+      const error = new Error('AI response did not include a summary.');
+      error.statusCode = 502;
+      throw error;
+    }
+
+    return {
+      summary: String(summary).trim(),
+      model: config.model,
+      baseUrl: config.baseUrl
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const timeoutError = new Error('AI request timed out.');
+      timeoutError.statusCode = 504;
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 let watcher = null;
@@ -732,15 +1189,7 @@ async function configureWatcher() {
 
 app.get('/api/health', async () => ({ ok: true }));
 
-app.get('/api/settings', async () => {
-  const settings = getSettingsObject();
-  return {
-    libraryRoot: settings.libraryRoot || '',
-    skipSeconds: Number(settings.skipSeconds || 10),
-    libraryRows: Number(settings.libraryRows || 3),
-    controlsHideMs: Number(settings.controlsHideMs || 2500)
-  };
-});
+app.get('/api/settings', async () => getPublicSettings());
 
 app.post('/api/system/select-folder', async (request, reply) => {
   try {
@@ -806,6 +1255,45 @@ app.put('/api/settings', async (request, reply) => {
     updates.push('controlsHideMs');
   }
 
+  if (Object.hasOwn(body, 'aiApiBaseUrl')) {
+    const value = String(body.aiApiBaseUrl || '').trim();
+    if (value) {
+      let parsed;
+      try {
+        parsed = new URL(value);
+      } catch {
+        return reply.code(400).send({ error: 'aiApiBaseUrl must be a valid URL.' });
+      }
+
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        return reply.code(400).send({ error: 'aiApiBaseUrl must start with http:// or https://.' });
+      }
+
+      setSetting('aiApiBaseUrl', value.replace(/\/+$/, ''));
+    } else {
+      setSetting('aiApiBaseUrl', '');
+    }
+    updates.push('aiApiBaseUrl');
+  }
+
+  if (Object.hasOwn(body, 'aiModel')) {
+    setSetting('aiModel', String(body.aiModel || '').trim());
+    updates.push('aiModel');
+  }
+
+  if (Object.hasOwn(body, 'aiApiKey')) {
+    const value = String(body.aiApiKey || '').trim();
+    if (value) {
+      setSetting('aiApiKey', value);
+      updates.push('aiApiKey');
+    }
+  }
+
+  if (body.clearAiApiKey === true) {
+    setSetting('aiApiKey', '');
+    updates.push('aiApiKey');
+  }
+
   if (updates.includes('libraryRoot')) {
     await configureWatcher();
   }
@@ -813,12 +1301,7 @@ app.put('/api/settings', async (request, reply) => {
   return {
     ok: true,
     updated: updates,
-    settings: {
-      libraryRoot: getSetting('libraryRoot', ''),
-      skipSeconds: Number(getSetting('skipSeconds', 10)),
-      libraryRows: Number(getSetting('libraryRows', 3)),
-      controlsHideMs: Number(getSetting('controlsHideMs', 2500))
-    }
+    settings: getPublicSettings()
   };
 });
 
@@ -1082,6 +1565,34 @@ app.get('/api/database/summary', async (request, reply) => {
   }
 });
 
+app.get('/api/for-you/insights', async (request, reply) => {
+  try {
+    return buildForYouInsights();
+  } catch (error) {
+    return reply.code(500).send({ error: error.message || 'Failed to build For You insights.' });
+  }
+});
+
+app.post('/api/ai/preference-summary', async (request, reply) => {
+  try {
+    const insights = buildForYouInsights();
+    const result = await generatePreferenceSummary(insights, {
+      language: request.body?.language || request.headers['accept-language'] || ''
+    });
+
+    return {
+      ok: true,
+      summary: result.summary,
+      model: result.model,
+      baseUrl: result.baseUrl,
+      insights
+    };
+  } catch (error) {
+    const statusCode = Number(error.statusCode) || 500;
+    return reply.code(statusCode).send({ error: error.message || 'Failed to generate preference summary.' });
+  }
+});
+
 app.get('/api/videos/:id', async (request, reply) => {
   const id = Number(request.params.id);
   if (!Number.isInteger(id) || id <= 0) {
@@ -1324,6 +1835,7 @@ app.delete('/api/videos/:id', async (request, reply) => {
 
   db.prepare('DELETE FROM comments WHERE video_id = ?').run(id);
   db.prepare('DELETE FROM timeline_notes WHERE video_id = ?').run(id);
+  db.prepare('DELETE FROM watch_sessions WHERE video_id = ?').run(id);
   db.prepare('DELETE FROM video_tags WHERE video_id = ?').run(id);
   db.prepare('DELETE FROM video_starrings WHERE video_id = ?').run(id);
   db.prepare('DELETE FROM videos WHERE id = ?').run(id);
@@ -1514,6 +2026,108 @@ app.delete('/api/notes/:id', async (request, reply) => {
   touchVideo(note.video_id);
 
   return { ok: true };
+});
+
+app.post('/api/videos/:id/watch-sessions', async (request, reply) => {
+  const videoId = Number(request.params.id);
+  if (!Number.isInteger(videoId) || videoId <= 0) {
+    return reply.code(400).send({ error: 'Invalid video id' });
+  }
+
+  const video = db.prepare("SELECT id, duration FROM videos WHERE id = ? AND file_name NOT LIKE '._%'").get(videoId);
+  if (!video) {
+    return reply.code(404).send({ error: 'Video not found' });
+  }
+
+  const now = isoNow();
+  const mediaDurationSec = parseNonNegativeNumber(request.body?.durationSec, Number(video.duration || 0));
+  const startPositionSec = parseNonNegativeNumber(request.body?.positionSec, 0);
+  const completionRatio = mediaDurationSec > 0 ? Math.min(1, startPositionSec / mediaDurationSec) : 0;
+  const result = db
+    .prepare(`
+      INSERT INTO watch_sessions (
+        video_id,
+        started_at,
+        media_duration_sec,
+        last_position_sec,
+        max_position_sec,
+        completion_ratio,
+        created_at,
+        updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(videoId, now, mediaDurationSec, startPositionSec, startPositionSec, completionRatio, now, now);
+
+  return {
+    ok: true,
+    id: result.lastInsertRowid,
+    startedAt: now
+  };
+});
+
+app.post('/api/watch-sessions/:id/progress', async (request, reply) => {
+  const id = Number(request.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return reply.code(400).send({ error: 'Invalid watch session id' });
+  }
+
+  const existing = db.prepare('SELECT * FROM watch_sessions WHERE id = ?').get(id);
+  if (!existing) {
+    return reply.code(404).send({ error: 'Watch session not found' });
+  }
+
+  const mediaDurationSec = parseNonNegativeNumber(request.body?.durationSec, Number(existing.media_duration_sec || 0));
+  const watchedSeconds = Math.max(
+    Number(existing.watched_seconds || 0),
+    parseNonNegativeNumber(request.body?.watchedSeconds, Number(existing.watched_seconds || 0))
+  );
+  const lastPositionSec = parseNonNegativeNumber(request.body?.lastPositionSec, Number(existing.last_position_sec || 0));
+  const requestedMaxPositionSec = Math.max(
+    lastPositionSec,
+    parseNonNegativeNumber(request.body?.maxPositionSec, Number(existing.max_position_sec || 0))
+  );
+  const maxPositionSec = Math.max(Number(existing.max_position_sec || 0), requestedMaxPositionSec);
+  const progressBasis = Math.max(maxPositionSec, watchedSeconds);
+  const completionRatio = mediaDurationSec > 0 ? Math.min(1, progressBasis / mediaDurationSec) : 0;
+  const ended = request.body?.ended === true;
+  const now = isoNow();
+  const endedAt = ended ? (existing.ended_at || now) : existing.ended_at;
+  const endedReason = ended
+    ? String(request.body?.reason || existing.ended_reason || 'closed').trim().slice(0, 48)
+    : existing.ended_reason || '';
+
+  db.prepare(`
+    UPDATE watch_sessions
+    SET
+      ended_at = ?,
+      media_duration_sec = ?,
+      watched_seconds = ?,
+      last_position_sec = ?,
+      max_position_sec = ?,
+      completion_ratio = ?,
+      ended_reason = ?,
+      updated_at = ?
+    WHERE id = ?
+  `).run(
+    endedAt,
+    mediaDurationSec,
+    watchedSeconds,
+    lastPositionSec,
+    maxPositionSec,
+    completionRatio,
+    endedReason,
+    now,
+    id
+  );
+
+  return {
+    ok: true,
+    id,
+    watchedSeconds,
+    completionRatio,
+    endedAt
+  };
 });
 
 app.post('/api/videos/:id/view', async (request, reply) => {
@@ -1816,7 +2430,7 @@ async function start() {
     await cleanupStaleTimelinePreviewTemps();
     cleanupInterruptedLibraryScanState();
     await app.listen({ port, host });
-    console.log(`CornField is running at http://${host}:${port}`);
+    console.log(`CornField AI is running at http://${host}:${port}`);
   } catch (error) {
     console.error(error);
     process.exit(1);

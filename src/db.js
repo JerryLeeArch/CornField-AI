@@ -91,6 +91,22 @@ CREATE TABLE IF NOT EXISTS timeline_notes (
   FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS watch_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  video_id INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  media_duration_sec REAL NOT NULL DEFAULT 0,
+  watched_seconds REAL NOT NULL DEFAULT 0,
+  last_position_sec REAL NOT NULL DEFAULT 0,
+  max_position_sec REAL NOT NULL DEFAULT 0,
+  completion_ratio REAL NOT NULL DEFAULT 0,
+  ended_reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(video_id) REFERENCES videos(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -295,6 +311,8 @@ export function ensureDefaultSettings() {
   if (getSetting('skipSeconds') === null) setSetting('skipSeconds', '10');
   if (getSetting('libraryRows') === null) setSetting('libraryRows', '3');
   if (getSetting('controlsHideMs') === null) setSetting('controlsHideMs', '2500');
+  if (getSetting('aiApiBaseUrl') === null) setSetting('aiApiBaseUrl', 'https://api.openai.com/v1');
+  if (getSetting('aiModel') === null) setSetting('aiModel', '');
 }
 
 const insertTagStmt = db.prepare('INSERT OR IGNORE INTO tags(name) VALUES (?)');
@@ -440,7 +458,14 @@ function ensureCommentRatingColumns() {
   }
 }
 
+function ensureWatchSessionIndexes() {
+  db.exec('CREATE INDEX IF NOT EXISTS idx_watch_sessions_video_id ON watch_sessions(video_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_watch_sessions_started_at ON watch_sessions(started_at)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_watch_sessions_updated_at ON watch_sessions(updated_at)');
+}
+
 ensureDefaultSettings();
 ensureCommentRatingColumns();
+ensureWatchSessionIndexes();
 cleanupSystemShadowVideos();
 mergeDuplicateTags();

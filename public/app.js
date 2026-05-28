@@ -6,6 +6,11 @@ const browseLibraryRootBtn = document.getElementById('browseLibraryRootBtn');
 const skipSecondsInput = document.getElementById('skipSecondsInput');
 const libraryRowsInput = document.getElementById('libraryRowsInput');
 const controlsHideMsInput = document.getElementById('controlsHideMsInput');
+const aiApiBaseUrlInput = document.getElementById('aiApiBaseUrlInput');
+const aiModelInput = document.getElementById('aiModelInput');
+const aiApiKeyInput = document.getElementById('aiApiKeyInput');
+const aiApiKeyStatus = document.getElementById('aiApiKeyStatus');
+const clearAiApiKeyBtn = document.getElementById('clearAiApiKeyBtn');
 const scanNowBtn = document.getElementById('scanNowBtn');
 const scanProceedBtn = document.getElementById('scanProceedBtn');
 const scanCancelBtn = document.getElementById('scanCancelBtn');
@@ -61,6 +66,7 @@ const state = {
     page: 1
   },
   dbSummary: null,
+  forYouInsights: null,
   playerPrefs: {
     volume: initialVolume,
     muted: initialMuted
@@ -106,6 +112,7 @@ let libraryScanStatusRequest = null;
 const LIBRARY_SCAN_STATUS_POLL_MS = 900;
 const LIBRARY_SCAN_STATUS_IDLE_POLL_MS = 4000;
 const DB_SUMMARY_TTL_MS = 30000;
+const WATCH_PROGRESS_SEND_MS = 5000;
 
 function cleanupActiveView() {
   for (const fn of cleanups) {
@@ -209,7 +216,7 @@ function confirmVideoDeletion({ videoId, displayTitle, fileName }) {
 
   deleteConfirmTitle.textContent = 'Delete Video?';
   deleteConfirmMessage.textContent =
-    'Delete Video removes the original file and all CornField metadata. Delete Metadata Only keeps the original file, removes all CornField data for this video, and Scan Library will import it again as a new video later.';
+    'Delete Video removes the original file and all CornField AI metadata. Delete Metadata Only keeps the original file, removes all CornField AI data for this video, and Scan Library will import it again as a new video later.';
   deleteConfirmDetails.innerHTML = `
     <div><strong>ID:</strong> ${escapeHtml(videoId)}</div>
     <div><strong>Display Title:</strong> ${escapeHtml(displayTitle || '-')}</div>
@@ -251,6 +258,10 @@ function parseHash() {
 
   if (parts[0] === 'starrings') {
     return { name: 'starrings' };
+  }
+
+  if (parts[0] === 'for-you') {
+    return { name: 'for-you' };
   }
 
   if (parts[0] === 'database') {
@@ -471,6 +482,18 @@ function formatPercent(part, total) {
   return `${Math.round((numerator / denominator) * 100)}%`;
 }
 
+function formatRatioPercent(value) {
+  const ratio = Number(value);
+  if (!Number.isFinite(ratio) || ratio <= 0) return '0%';
+  return `${Math.round(Math.max(0, Math.min(1, ratio)) * 100)}%`;
+}
+
+function formatRatingValue(value) {
+  const rating = Number(value);
+  if (!Number.isFinite(rating)) return '-';
+  return (Math.round(rating * 10) / 10).toFixed(1);
+}
+
 function formatMarkerTimeValue(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '';
 
@@ -662,33 +685,61 @@ function updateSettingsDialogInputs() {
   libraryRowsInput.value = String(state.settings?.libraryRows || 3);
   const controlsHideValue = String(state.settings?.controlsHideMs ?? 2500);
   controlsHideMsInput.value = controlsHideMsInput.querySelector(`option[value="${controlsHideValue}"]`) ? controlsHideValue : '2500';
+  aiApiBaseUrlInput.value = state.settings?.aiApiBaseUrl || '';
+  aiModelInput.value = state.settings?.aiModel || '';
+  aiApiKeyInput.value = '';
+  const keySource = state.settings?.aiApiKeySource;
+  aiApiKeyStatus.textContent = state.settings?.aiApiKeyConfigured
+    ? `Key configured${keySource ? ` via ${keySource}` : ''}.`
+    : 'No key configured.';
+  clearAiApiKeyBtn.disabled = !state.settings?.aiApiKeyConfigured || keySource === 'environment';
   hideScanPreview();
 }
 
 function buildSettingsPayload() {
-  return {
-    libraryRoot: libraryRootInput.value.trim(),
+  const libraryRoot = libraryRootInput.value.trim();
+  const payload = {
     skipSeconds: Number(skipSecondsInput.value),
     libraryRows: Number(libraryRowsInput.value),
-    controlsHideMs: Number(controlsHideMsInput.value)
+    controlsHideMs: Number(controlsHideMsInput.value),
+    aiApiBaseUrl: aiApiBaseUrlInput.value.trim(),
+    aiModel: aiModelInput.value.trim()
   };
+
+  if (libraryRoot || state.settings?.libraryRoot) {
+    payload.libraryRoot = libraryRoot;
+  }
+
+  const apiKey = aiApiKeyInput.value.trim();
+  if (apiKey) {
+    payload.aiApiKey = apiKey;
+  }
+
+  return payload;
 }
 
 function settingsPayloadMatchesState(payload) {
   if (!state.settings) return false;
 
+  const rootMatches = Object.hasOwn(payload, 'libraryRoot')
+    ? payload.libraryRoot === String(state.settings.libraryRoot || '')
+    : !state.settings.libraryRoot;
+
   return (
-    payload.libraryRoot === String(state.settings.libraryRoot || '') &&
+    rootMatches &&
     payload.skipSeconds === Number(state.settings.skipSeconds || 10) &&
     payload.libraryRows === Number(state.settings.libraryRows || 3) &&
-    payload.controlsHideMs === Number(state.settings.controlsHideMs ?? 2500)
+    payload.controlsHideMs === Number(state.settings.controlsHideMs ?? 2500) &&
+    payload.aiApiBaseUrl === String(state.settings.aiApiBaseUrl || '') &&
+    payload.aiModel === String(state.settings.aiModel || '') &&
+    !payload.aiApiKey
   );
 }
 
 async function persistSettingsFromDialog() {
   const payload = buildSettingsPayload();
 
-  if (!payload.libraryRoot) {
+  if (Object.hasOwn(payload, 'libraryRoot') && !payload.libraryRoot) {
     throw new Error('Please enter Library Folder Path.');
   }
 
@@ -1618,6 +1669,120 @@ async function renderVideoView(videoId) {
     const controlsHideMsRaw = Number(state.settings?.controlsHideMs ?? 2500);
     const controlsHideMs = Number.isFinite(controlsHideMsRaw) ? controlsHideMsRaw : 2500;
     let hoveredProgressRatio = null;
+    const watchSessionState = {
+      id: null,
+      creating: null,
+      watchedSeconds: 0,
+      lastPlayhead: null,
+      maxPositionSec: 0,
+      lastSentAt: 0,
+      closed: false
+    };
+
+    function getCurrentMediaDuration() {
+      const videoDuration = Number(videoEl.duration || 0);
+      if (videoDuration > 0) return videoDuration;
+      const indexedDuration = Number(video.duration || 0);
+      return indexedDuration > 0 ? indexedDuration : 0;
+    }
+
+    function accumulateWatchProgress() {
+      const currentTime = Number(videoEl.currentTime || 0);
+      if (!Number.isFinite(currentTime) || currentTime < 0) {
+        return;
+      }
+
+      watchSessionState.maxPositionSec = Math.max(watchSessionState.maxPositionSec, currentTime);
+
+      if (!videoEl.paused && Number.isFinite(watchSessionState.lastPlayhead)) {
+        const delta = currentTime - watchSessionState.lastPlayhead;
+        if (delta > 0 && delta < 4) {
+          watchSessionState.watchedSeconds += delta;
+        }
+      }
+
+      watchSessionState.lastPlayhead = currentTime;
+    }
+
+    async function ensureWatchSession() {
+      if (watchSessionState.id || watchSessionState.closed) {
+        return watchSessionState.id;
+      }
+
+      if (watchSessionState.creating) {
+        return watchSessionState.creating;
+      }
+
+      watchSessionState.creating = api(`/api/videos/${videoId}/watch-sessions`, {
+        method: 'POST',
+        body: JSON.stringify({
+          durationSec: getCurrentMediaDuration(),
+          positionSec: Number(videoEl.currentTime || 0)
+        })
+      })
+        .then((payload) => {
+          watchSessionState.id = payload.id;
+          return payload.id;
+        })
+        .catch(() => null)
+        .finally(() => {
+          watchSessionState.creating = null;
+        });
+
+      return watchSessionState.creating;
+    }
+
+    function buildWatchProgressPayload({ ended = false, reason = 'progress' } = {}) {
+      accumulateWatchProgress();
+      return {
+        durationSec: getCurrentMediaDuration(),
+        watchedSeconds: Math.max(0, watchSessionState.watchedSeconds),
+        lastPositionSec: Number(videoEl.currentTime || 0),
+        maxPositionSec: Math.max(watchSessionState.maxPositionSec, Number(videoEl.currentTime || 0)),
+        ended,
+        reason
+      };
+    }
+
+    async function sendWatchProgress(options = {}) {
+      const sessionId = await ensureWatchSession();
+      if (!sessionId) return;
+
+      const payload = buildWatchProgressPayload(options);
+      watchSessionState.lastSentAt = Date.now();
+
+      try {
+        await api(`/api/watch-sessions/${sessionId}/progress`, {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+      } catch {
+        // Watch tracking should never interrupt playback.
+      }
+    }
+
+    function sendWatchProgressBeacon(reason = 'closed') {
+      if (!watchSessionState.id || watchSessionState.closed) {
+        return;
+      }
+
+      watchSessionState.closed = true;
+      const payload = buildWatchProgressPayload({ ended: true, reason });
+      const body = JSON.stringify(payload);
+
+      if (navigator.sendBeacon) {
+        const blob = new Blob([body], { type: 'application/json' });
+        navigator.sendBeacon(`/api/watch-sessions/${watchSessionState.id}/progress`, blob);
+        return;
+      }
+
+      fetch(`/api/watch-sessions/${watchSessionState.id}/progress`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true
+      }).catch(() => {});
+    }
 
     function showControls() {
       playerControls.classList.remove('hidden');
@@ -1914,15 +2079,44 @@ async function renderVideoView(videoId) {
       }
     });
 
-    videoEl.addEventListener('timeupdate', syncProgressFromVideo);
+    videoEl.addEventListener('timeupdate', () => {
+      syncProgressFromVideo();
+      accumulateWatchProgress();
+      const shouldSendProgress = watchSessionState.id && Date.now() - watchSessionState.lastSentAt >= WATCH_PROGRESS_SEND_MS;
+      if (shouldSendProgress) {
+        sendWatchProgress();
+      }
+    });
     videoEl.addEventListener('play', () => {
       playPauseBtn.textContent = 'Pause';
+      watchSessionState.lastPlayhead = Number(videoEl.currentTime || 0);
+      ensureWatchSession();
       showControls();
     });
 
     videoEl.addEventListener('pause', () => {
       playPauseBtn.textContent = 'Play';
+      if (!videoEl.ended && watchSessionState.id) {
+        sendWatchProgress({ reason: 'pause' });
+      }
       showControls();
+    });
+
+    videoEl.addEventListener('seeking', () => {
+      accumulateWatchProgress();
+      watchSessionState.lastPlayhead = null;
+    });
+
+    videoEl.addEventListener('seeked', () => {
+      watchSessionState.lastPlayhead = Number(videoEl.currentTime || 0);
+      watchSessionState.maxPositionSec = Math.max(watchSessionState.maxPositionSec, watchSessionState.lastPlayhead);
+      if (watchSessionState.id) {
+        sendWatchProgress({ reason: 'seek' });
+      }
+    });
+
+    videoEl.addEventListener('ended', () => {
+      sendWatchProgress({ ended: true, reason: 'ended' });
     });
 
     playPauseBtn.addEventListener('click', () => {
@@ -2424,6 +2618,16 @@ async function renderVideoView(videoId) {
       }
     });
 
+    const pageHideHandler = () => {
+      sendWatchProgressBeacon('pagehide');
+    };
+    window.addEventListener('pagehide', pageHideHandler);
+    addCleanup(() => window.removeEventListener('pagehide', pageHideHandler));
+
+    addCleanup(() => {
+      sendWatchProgressBeacon('navigate');
+    });
+
     addCleanup(() => {
       if (hideTimer) clearTimeout(hideTimer);
       videoEl.pause();
@@ -2494,6 +2698,209 @@ async function renderStarringsView() {
   }
 }
 
+function createForYouSignalListHtml(items, emptyText) {
+  if (!items?.length) {
+    return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+  }
+
+  return items
+    .map((item) => {
+      const ratingText = item.averageRating === null || item.averageRating === undefined
+        ? ''
+        : ` · ★ ${formatRatingValue(item.averageRating)}`;
+      return `
+        <div class="signal-item">
+          <strong>${escapeHtml(item.name || '-')}</strong>
+          <span class="muted">${formatCollectionDuration(item.watchedSeconds)} watched · ${formatNumber(item.views)} views${ratingText}</span>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+function createForYouVideoListHtml(items, emptyText) {
+  if (!items?.length) {
+    return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+  }
+
+  return items
+    .map((video) => {
+      const thumb = video.thumbnailPath
+        ? `<img src="${escapeHtml(video.thumbnailPath)}" alt="" loading="lazy" />`
+        : '<div class="for-you-video-placeholder"></div>';
+      const ratingText = Number(video.ratingCount || 0)
+        ? ` · ★ ${formatRatingValue(video.averageRating)}`
+        : '';
+      const completionText = Number(video.completionRatio || 0) > 0
+        ? ` · ${formatRatioPercent(video.completionRatio)} max`
+        : '';
+
+      return `
+        <button type="button" class="for-you-video-card" data-for-you-video="${video.id}">
+          ${thumb}
+          <span>
+            <strong>${escapeHtml(video.displayTitle || `Video ${video.id}`)}</strong>
+            <small>${formatCollectionDuration(video.watchedSeconds)} watched${completionText}${ratingText}</small>
+          </span>
+        </button>
+      `;
+    })
+    .join('');
+}
+
+async function renderForYouView() {
+  const token = currentRenderToken;
+  mainEl.innerHTML = '<div class="status">Loading For You...</div>';
+
+  try {
+    const insights = await api('/api/for-you/insights');
+    if (token !== currentRenderToken) return;
+
+    state.forYouInsights = insights;
+    const overview = insights.overview || {};
+    const aiReady = Boolean(state.settings?.aiApiKeyConfigured && state.settings?.aiModel);
+    const aiStatus = state.settings?.aiApiKeyConfigured
+      ? `AI ${state.settings.aiModel || 'model missing'}`
+      : 'AI not configured';
+
+    mainEl.innerHTML = `
+      <section class="section-panel for-you-hero">
+        <div class="panel-body">
+          <div class="for-you-header">
+            <div>
+              <h2 class="section-title">For You</h2>
+              <div class="muted">${escapeHtml(aiStatus)} · ${formatNumber(overview.watchSessionCount || 0)} watch sessions</div>
+            </div>
+            <div class="for-you-actions">
+              <button id="openAiSettingsBtn" type="button">Settings</button>
+              <button id="generatePreferenceSummaryBtn" class="primary" type="button" ${aiReady ? '' : 'disabled'}>Generate Summary</button>
+            </div>
+          </div>
+          <div id="aiSummaryBox" class="ai-summary-box">
+            ${
+              aiReady
+                ? '<div class="muted">Ready to summarize your local viewing signals.</div>'
+                : '<div class="warning">Add an AI API key and model in Settings.</div>'
+            }
+          </div>
+        </div>
+      </section>
+
+      <section class="for-you-stat-grid">
+        <article class="for-you-stat">
+          <span>Watched Time</span>
+          <strong>${formatCollectionDuration(overview.totalWatchedSeconds || 0)}</strong>
+          <small>${formatNumber(overview.watchedVideoCount || 0)} videos watched</small>
+        </article>
+        <article class="for-you-stat">
+          <span>Completion</span>
+          <strong>${formatRatioPercent(overview.averageCompletionRatio || 0)}</strong>
+          <small>average session completion</small>
+        </article>
+        <article class="for-you-stat">
+          <span>Ratings</span>
+          <strong>${formatNumber(overview.ratingCount || 0)}</strong>
+          <small>${overview.averageRating === null ? 'No average yet' : `${formatRatingValue(overview.averageRating)}/5 average`}</small>
+        </article>
+        <article class="for-you-stat">
+          <span>Library Signals</span>
+          <strong>${formatNumber((overview.totalViews || 0) + (overview.noteCount || 0))}</strong>
+          <small>${formatNumber(overview.totalViews || 0)} views · ${formatNumber(overview.noteCount || 0)} markers</small>
+        </article>
+      </section>
+
+      <div class="for-you-grid">
+        <section class="section-panel">
+          <div class="panel-body">
+            <h3 class="section-title">Top Tags</h3>
+            <div class="signal-list">${createForYouSignalListHtml(insights.topTags, 'No tag signals yet.')}</div>
+          </div>
+        </section>
+        <section class="section-panel">
+          <div class="panel-body">
+            <h3 class="section-title">Top Categories</h3>
+            <div class="signal-list">${createForYouSignalListHtml(insights.topCategories, 'No category signals yet.')}</div>
+          </div>
+        </section>
+        <section class="section-panel">
+          <div class="panel-body">
+            <h3 class="section-title">Top Starring</h3>
+            <div class="signal-list">${createForYouSignalListHtml(insights.topStarrings, 'No starring signals yet.')}</div>
+          </div>
+        </section>
+        <section class="section-panel">
+          <div class="panel-body">
+            <h3 class="section-title">Duration Pattern</h3>
+            <div class="signal-list">${createForYouSignalListHtml(insights.durationBuckets, 'No duration signals yet.')}</div>
+          </div>
+        </section>
+      </div>
+
+      <section class="section-panel" style="margin-top: 1rem;">
+        <div class="panel-body">
+          <h3 class="section-title">Recent Signals</h3>
+          <div class="for-you-video-list">${createForYouVideoListHtml(insights.recentlyWatched, 'No watch sessions yet.')}</div>
+        </div>
+      </section>
+
+      <section class="section-panel" style="margin-top: 1rem;">
+        <div class="panel-body">
+          <h3 class="section-title">Strong Signals</h3>
+          <div class="for-you-video-list">${createForYouVideoListHtml(
+            [...(insights.topWatchedVideos || []), ...(insights.topRatedVideos || [])]
+              .filter((video, index, all) => all.findIndex((item) => item.id === video.id) === index)
+              .slice(0, 12),
+            'Watch or rate videos to build stronger signals.'
+          )}</div>
+        </div>
+      </section>
+    `;
+
+    document.getElementById('openAiSettingsBtn').addEventListener('click', () => {
+      updateSettingsDialogInputs();
+      settingsDialog.showModal();
+    });
+
+    document.querySelectorAll('[data-for-you-video]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        const videoId = Number(event.currentTarget.getAttribute('data-for-you-video') || 0);
+        if (videoId > 0) {
+          setHash(buildVideoHash(videoId));
+        }
+      });
+    });
+
+    const summaryBox = document.getElementById('aiSummaryBox');
+    const generateBtn = document.getElementById('generatePreferenceSummaryBtn');
+    generateBtn.addEventListener('click', async () => {
+      generateBtn.disabled = true;
+      summaryBox.innerHTML = '<div class="status">Generating summary...</div>';
+
+      try {
+        const result = await api('/api/ai/preference-summary', {
+          method: 'POST',
+          body: JSON.stringify({ language: navigator.language || 'en' })
+        });
+        if (token !== currentRenderToken) return;
+        summaryBox.innerHTML = `
+          <div class="ai-summary-meta">${escapeHtml(result.model || 'AI summary')}</div>
+          <div class="ai-summary-text">${escapeHtml(result.summary || '')}</div>
+        `;
+      } catch (error) {
+        if (token !== currentRenderToken) return;
+        summaryBox.innerHTML = `<div class="warning error">${escapeHtml(error.message)}</div>`;
+      } finally {
+        if (token === currentRenderToken) {
+          generateBtn.disabled = !aiReady;
+        }
+      }
+    });
+  } catch (error) {
+    if (token !== currentRenderToken) return;
+    mainEl.innerHTML = `<div class="warning error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 async function renderDatabaseView() {
   const token = currentRenderToken;
   mainEl.innerHTML = '<div class="status">Loading video database...</div>';
@@ -2519,6 +2926,7 @@ async function renderDatabaseView() {
     const previewCoverage = totalVideos > 0 ? formatPercent(totals.previewCount, totalVideos) : '0%';
     const interactionCounts = {
       views: Number(totals.totalViews || 0),
+      sessions: Number(totals.watchSessionCount || 0),
       reviews: Number(totals.commentCount || 0),
       markers: Number(totals.noteCount || 0),
       tags: Number(totals.tagCount || 0),
@@ -2577,7 +2985,7 @@ async function renderDatabaseView() {
           <div class="db-header">
             <div>
               <h2 class="section-title">Video DB</h2>
-              <div class="muted">Overview of indexed videos and CornField-generated database assets.</div>
+              <div class="muted">Overview of indexed videos and CornField AI-generated database assets.</div>
             </div>
             <div class="db-summary-stamp">${totals.lastUpdatedAt ? `Updated ${escapeHtml(formatDateTime(totals.lastUpdatedAt))}` : 'No indexed videos yet'}</div>
           </div>
@@ -2603,9 +3011,10 @@ async function renderDatabaseView() {
             <article class="db-summary-card">
               <span class="db-summary-label">Total Interactions</span>
               <strong>${formatNumber(totalInteractions)}</strong>
-              <div class="db-summary-value-sub">CornField activity and metadata signals</div>
+              <div class="db-summary-value-sub">CornField AI activity and metadata signals</div>
               <div class="db-summary-inline">
                 <span>${formatNumber(interactionCounts.views)} views</span>
+                <span>${formatNumber(interactionCounts.sessions)} sessions</span>
                 <span>${formatNumber(interactionCounts.reviews)} reviews</span>
                 <span>${formatNumber(interactionCounts.markers)} markers</span>
                 <span>${formatNumber(interactionCounts.tags)} tags</span>
@@ -2798,7 +3207,7 @@ async function renderRoute() {
     stopLibraryScanStatusPolling();
   }
 
-  if (!state.settings.libraryRoot && !['starrings', 'database'].includes(state.route.name)) {
+  if (!state.settings.libraryRoot && !['starrings', 'database', 'for-you'].includes(state.route.name)) {
     renderNoLibraryConfigured();
     return;
   }
@@ -2815,6 +3224,11 @@ async function renderRoute() {
 
   if (state.route.name === 'starrings') {
     await renderStarringsView();
+    return;
+  }
+
+  if (state.route.name === 'for-you') {
+    await renderForYouView();
     return;
   }
 
@@ -2855,6 +3269,7 @@ function setupGlobalEvents() {
 
   document.getElementById('goLibrary').addEventListener('click', () => goLibraryHome({ reseedRandom: true }));
   document.getElementById('navLibrary').addEventListener('click', () => goLibraryHome());
+  document.getElementById('navForYou').addEventListener('click', () => setHash('#/for-you'));
   document.getElementById('navStarrings').addEventListener('click', () => setHash('#/starrings'));
   document.getElementById('navDatabase').addEventListener('click', () => setHash('#/database'));
 
@@ -2887,6 +3302,27 @@ function setupGlobalEvents() {
   skipSecondsInput.addEventListener('change', autosaveSettingsHandler);
   libraryRowsInput.addEventListener('change', autosaveSettingsHandler);
   controlsHideMsInput.addEventListener('change', autosaveSettingsHandler);
+  aiApiBaseUrlInput.addEventListener('change', autosaveSettingsHandler);
+  aiModelInput.addEventListener('change', autosaveSettingsHandler);
+  aiApiKeyInput.addEventListener('change', autosaveSettingsHandler);
+  clearAiApiKeyBtn.addEventListener('click', async () => {
+    try {
+      const result = await api('/api/settings', {
+        method: 'PUT',
+        body: JSON.stringify({
+          aiApiBaseUrl: aiApiBaseUrlInput.value.trim(),
+          aiModel: aiModelInput.value.trim(),
+          clearAiApiKey: true
+        })
+      });
+      state.settings = result.settings;
+      updateSettingsDialogInputs();
+      showToast('AI key forgotten');
+    } catch (error) {
+      showToast(error.message, true);
+      updateSettingsDialogInputs();
+    }
+  });
   libraryRootInput.addEventListener('change', autosaveSettingsHandler);
   libraryRootInput.addEventListener('keydown', async (event) => {
     if (event.key !== 'Enter') return;

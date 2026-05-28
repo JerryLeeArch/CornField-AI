@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>CornField</title>
+    <title>CornField AI</title>
     <link rel="preload" href="/assets/brand/CornFieldLogo1.png?v=20260407-2" as="image" type="image/png" />
     <link rel="icon" href="/assets/brand/CornFieldLogo1-32.png?v=20260407-2" type="image/png" sizes="32x32" />
     <link rel="stylesheet" href="/styles.css" />
@@ -12,11 +12,12 @@
     <div id="app">
       <header class="topbar">
         <div class="brand" id="goLibrary">
-          <img class="brand-logo" src="/assets/brand/CornFieldLogo1.png?v=20260407-2" alt="CornField logo" width="160" height="160" loading="eager" fetchpriority="high" decoding="sync" />
-          <span class="brand-text">CornField</span>
+          <img class="brand-logo" src="/assets/brand/CornFieldLogo1.png?v=20260407-2" alt="CornField AI logo" width="160" height="160" loading="eager" fetchpriority="high" decoding="sync" />
+          <span class="brand-text">CornField AI</span>
         </div>
         <nav class="nav-links">
           <button id="navLibrary" class="link-btn">Library</button>
+          <button id="navForYou" class="link-btn">For You</button>
           <button id="navStarrings" class="link-btn">Starring</button>
         </nav>
         <div class="topbar-actions">
@@ -57,6 +58,22 @@
             <option value="4000">4 seconds</option>
             <option value="6000">6 seconds</option>
           </select>
+        </label>
+        <label>
+          AI API Base URL
+          <input id="aiApiBaseUrlInput" type="url" placeholder="https://api.openai.com/v1" />
+        </label>
+        <label>
+          AI Model
+          <input id="aiModelInput" type="text" placeholder="Provider model name" />
+        </label>
+        <label>
+          AI API Key
+          <div class="settings-secret-row">
+            <input id="aiApiKeyInput" type="password" autocomplete="off" placeholder="Paste key to save locally" />
+            <button type="button" id="clearAiApiKeyBtn">Forget Key</button>
+          </div>
+          <span id="aiApiKeyStatus" class="settings-hint"></span>
         </label>
         <label>
           Library Folder Path
