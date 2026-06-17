@@ -141,6 +141,19 @@ button:hover,
   border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
 }
 
+button:focus-visible,
+.link-btn:focus-visible,
+.settings-btn:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 2px;
+}
+
+.link-btn.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--accent);
+}
+
 button.primary {
   border-color: var(--accent);
   background: var(--accent);
@@ -220,9 +233,9 @@ main {
 }
 
 .tag-filter-btn.is-active {
-  border-color: color-mix(in srgb, var(--chip-active) 70%, #ffffff 10%);
-  background: color-mix(in srgb, var(--chip-active) 35%, var(--chip));
-  color: white;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--accent);
 }
 
 input,
@@ -234,6 +247,16 @@ textarea {
   font-size: 0.95rem;
   background: var(--surface);
   color: var(--ink);
+}
+
+/* Themed focus: replace the browser default (blue) focus ring app-wide.
+   Range sliders are excluded (they keep their own accent focus style). */
+input:not([type='range']):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 
 input::placeholder,
@@ -295,12 +318,15 @@ textarea {
   border-radius: inherit;
 }
 
-.video-card.clickable-card {
+.video-card.clickable-card,
+.starring-item.clickable-card {
   cursor: pointer;
 }
 
 .video-card.clickable-card:hover,
-.video-card.clickable-card:focus-within {
+.video-card.clickable-card:focus-within,
+.starring-item.clickable-card:hover,
+.starring-item.clickable-card:focus-within {
   transform: translateY(-2px);
   border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
   box-shadow: 0 22px 38px rgba(0, 0, 0, 0.42);
@@ -403,6 +429,64 @@ textarea {
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+/* Video detail layout (theater toggle) */
+.video-view {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.video-content {
+  display: flex;
+  gap: 1rem;
+}
+
+.video-content-main,
+.video-content-side {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* Theater ON: video, recommended, reviews, metadata, jump markers stacked */
+.video-view.theater-on .video-content {
+  flex-direction: column;
+}
+
+/* Theater OFF: recommended + reviews on the left, metadata + jump markers
+   in a fixed-width narrow column on the right that stays put as the page resizes */
+.video-view.theater-off .video-content {
+  flex-direction: row;
+  align-items: flex-start;
+}
+
+.video-view.theater-off .video-content-main {
+  flex: 1 1 auto;
+}
+
+.video-view.theater-off .video-content-side {
+  flex: 0 0 340px;
+  width: 340px;
+}
+
+/* Keep sidebar forms single-column so they fit the fixed narrow width */
+.video-view.theater-off .video-content-side .meta-editor-form label {
+  grid-template-columns: 1fr;
+  gap: 0.35rem;
+}
+
+.video-view.theater-off .video-content-side .jump-marker-form {
+  grid-template-columns: 1fr;
+  align-items: stretch;
+}
+
+#theaterBtn.is-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface-2));
+  color: var(--accent);
 }
 
 .player-shell {
@@ -660,11 +744,14 @@ textarea {
 
 .control-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.5rem;
   align-items: center;
 }
 
 .control-row button {
+  flex: 0 0 auto;
+  white-space: nowrap;
   border-color: rgba(255, 255, 255, 0.35);
   background: rgba(0, 0, 0, 0.45);
   color: white;
@@ -679,7 +766,27 @@ textarea {
 }
 
 #muteBtn {
-  width: 76px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: 0.5rem;
+  color: white;
+}
+
+#muteBtn:hover {
+  border: none;
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.control-row .player-icon {
+  display: block;
+  width: 20px;
+  height: 20px;
 }
 
 .volume-slider {
@@ -688,6 +795,8 @@ textarea {
 
 .time-label {
   margin-left: auto;
+  flex: 0 0 auto;
+  white-space: nowrap;
   color: #f0f0f0;
   font-size: 0.85rem;
 }
@@ -1142,6 +1251,10 @@ textarea {
   line-height: 1.5;
 }
 
+.confirm-dialog .dialog-actions {
+  justify-content: flex-end;
+}
+
 .delete-confirm-copy {
   color: var(--ink);
   line-height: 1.5;
@@ -1255,6 +1368,23 @@ textarea {
   }
 }
 
+/* Mobile / narrow screens: no theater toggle, always use the stacked theater layout */
+@media (max-width: 900px) {
+  #theaterBtn {
+    display: none;
+  }
+
+  .video-view.theater-off .video-content {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .video-view.theater-off .video-content-side {
+    flex: 1 1 auto;
+    width: 100%;
+  }
+}
+
 .dialog-actions {
   display: flex;
   gap: 0.4rem;
@@ -1287,6 +1417,18 @@ textarea {
   margin-top: 1rem;
 }
 
+.tags-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.tag-sort-select {
+  width: auto;
+}
+
 .starring-list {
   display: grid;
   gap: 0.6rem;
@@ -1294,10 +1436,40 @@ textarea {
 }
 
 .starring-item {
+  position: relative;
   border: 1px solid var(--line);
   background: var(--surface);
   padding: 0.75rem;
   border-radius: 0.8rem;
+  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.route-banner {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  padding: 0.7rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+  border-radius: 0.8rem;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  font-size: 1.05rem;
+}
+
+.route-banner-label {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.route-banner-value {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+.route-banner-sep {
+  color: var(--muted);
 }
 
 .warning {
@@ -1351,10 +1523,6 @@ textarea {
 
   #searchInput {
     grid-column: span 1;
-  }
-
-  .control-row {
-    flex-wrap: wrap;
   }
 
   .db-header {
