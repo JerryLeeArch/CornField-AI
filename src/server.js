@@ -781,8 +781,8 @@ app.put('/api/settings', async (request, reply) => {
 
   if (Object.hasOwn(body, 'skipSeconds')) {
     const value = Number(body.skipSeconds);
-    if (![5, 10, 15].includes(value)) {
-      return reply.code(400).send({ error: 'skipSeconds must be one of 5, 10, 15.' });
+    if (![2.5, 5, 10, 15].includes(value)) {
+      return reply.code(400).send({ error: 'skipSeconds must be one of 2.5, 5, 10, 15.' });
     }
     setSetting('skipSeconds', String(value));
     updates.push('skipSeconds');
@@ -1684,7 +1684,16 @@ app.get('/api/videos/:id/related', async (request, reply) => {
   return { items: combined };
 });
 
-app.get('/api/tags', async () => {
+app.get('/api/tags', async (request) => {
+  const starringFilter = String(request.query?.starring || '').trim();
+  const starringClause = starringFilter
+    ? `AND EXISTS (
+         SELECT 1 FROM video_starrings vs
+         JOIN starrings s ON s.id = vs.starring_id
+         WHERE vs.video_id = v.id AND s.name = ?
+       )`
+    : '';
+
   const rows = db
     .prepare(
       `SELECT
@@ -1694,10 +1703,11 @@ app.get('/api/tags', async () => {
        JOIN video_tags vt ON vt.tag_id = t.id
        JOIN videos v ON v.id = vt.video_id
        WHERE v.is_missing = 0 AND v.file_name NOT LIKE '._%'
+       ${starringClause}
        GROUP BY t.id
        ORDER BY videoCount DESC, t.name ASC`
     )
-    .all();
+    .all(...(starringFilter ? [starringFilter] : []));
 
   const mergedByKey = new Map();
 

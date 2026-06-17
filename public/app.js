@@ -41,6 +41,7 @@ const deleteConfirmProceedBtn = document.getElementById('deleteConfirmProceedBtn
 const savedVolume = Number(localStorage.getItem('playerVolume'));
 const savedMuted = localStorage.getItem('playerMuted');
 const savedSort = localStorage.getItem('librarySort');
+const savedTheaterMode = localStorage.getItem('theaterMode');
 
 const initialVolume = Number.isFinite(savedVolume) ? Math.max(0, Math.min(1, savedVolume)) : 1;
 const initialMuted = savedMuted === '1';
@@ -63,7 +64,8 @@ const state = {
   dbSummary: null,
   playerPrefs: {
     volume: initialVolume,
-    muted: initialMuted
+    muted: initialMuted,
+    theaterOn: savedTheaterMode === null ? true : savedTheaterMode === '1'
   },
   pendingScanRoot: '',
   layout: {
@@ -107,6 +109,11 @@ const LIBRARY_SCAN_STATUS_POLL_MS = 900;
 const LIBRARY_SCAN_STATUS_IDLE_POLL_MS = 4000;
 const DB_SUMMARY_TTL_MS = 30000;
 
+const ICON_VOLUME_ON =
+  '<svg class="player-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>';
+const ICON_VOLUME_OFF =
+  '<svg class="player-icon" viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false"><path d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06c1.38-.31 2.63-.95 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>';
+
 function cleanupActiveView() {
   for (const fn of cleanups) {
     try {
@@ -121,6 +128,7 @@ function cleanupActiveView() {
 function savePlayerPrefs() {
   localStorage.setItem('playerVolume', String(state.playerPrefs.volume));
   localStorage.setItem('playerMuted', state.playerPrefs.muted ? '1' : '0');
+  localStorage.setItem('theaterMode', state.playerPrefs.theaterOn ? '1' : '0');
 }
 
 function addCleanup(fn) {
@@ -253,6 +261,10 @@ function parseHash() {
     return { name: 'starrings' };
   }
 
+  if (parts[0] === 'tags') {
+    return { name: 'tags' };
+  }
+
   if (parts[0] === 'database') {
     return { name: 'database' };
   }
@@ -300,30 +312,76 @@ async function loadMetadataSuggestionNames(path) {
   }
 }
 
-function getActiveCommaQuery(value) {
-  const parts = value.split(',');
-  return parts[parts.length - 1]?.trim() || '';
+function getCommaSegments(value) {
+  const segments = [];
+  let start = 0;
+  for (let i = 0; i <= value.length; i += 1) {
+    if (i === value.length || value[i] === ',') {
+      segments.push({ text: value.slice(start, i), start, end: i });
+      start = i + 1;
+    }
+  }
+  return segments;
 }
 
-function applyCommaSuggestion(value, suggestion) {
-  const completed = value
-    .split(',')
-    .slice(0, -1)
-    .map((part) => part.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  const seen = new Set();
-  const nextValues = [...completed, suggestion].filter((name) => {
-    const key = name.toLowerCase();
-
-    if (seen.has(key)) {
-      return false;
+function getActiveSegmentIndex(value, caret) {
+  const segments = getCommaSegments(value);
+  const pos = Math.max(0, Math.min(Number(caret) || 0, value.length));
+  for (let i = 0; i < segments.length; i += 1) {
+    if (pos >= segments[i].start && pos <= segments[i].end) {
+      return i;
     }
+  }
+  return segments.length - 1;
+}
 
+function getActiveCommaQuery(value, caret = value.length) {
+  const segments = getCommaSegments(value);
+  const index = getActiveSegmentIndex(value, caret);
+  return segments[index]?.text.trim() || '';
+}
+
+function applyCommaSuggestion(value, suggestion, caret = value.length) {
+  const segments = getCommaSegments(value);
+  const activeIndex = getActiveSegmentIndex(value, caret);
+  const isLast = activeIndex === segments.length - 1;
+  const names = segments.map((segment) => segment.text.replace(/\s+/g, ' ').trim());
+  names[activeIndex] = suggestion;
+
+  const seen = new Set();
+  const kept = [];
+  let activeKeptIndex = 0;
+  names.forEach((name, index) => {
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) {
+      if (index === activeIndex) {
+        activeKeptIndex = kept.findIndex((entry) => entry.toLowerCase() === key);
+      }
+      return;
+    }
     seen.add(key);
-    return true;
+    kept.push(name);
+    if (index === activeIndex) {
+      activeKeptIndex = kept.length - 1;
+    }
   });
 
-  return `${nextValues.join(', ')}, `;
+  if (kept.length === 0) {
+    return { value: '', caret: 0 };
+  }
+
+  // Completing the last word keeps the old behaviour: append ", " so the user can
+  // keep typing the next entry. Editing an earlier word replaces it in place and
+  // drops the caret right after it.
+  if (isLast) {
+    const nextValue = `${kept.join(', ')}, `;
+    return { value: nextValue, caret: nextValue.length };
+  }
+
+  const nextValue = kept.join(', ');
+  const caretPos = kept.slice(0, activeKeptIndex + 1).join(', ').length;
+  return { value: nextValue, caret: caretPos };
 }
 
 function attachCommaAutocomplete(input, suggestions) {
@@ -340,18 +398,21 @@ function attachCommaAutocomplete(input, suggestions) {
   let matches = [];
   let activeIndex = 0;
 
-  const getCompletedKeys = () =>
-    new Set(
-      input.value
-        .split(',')
-        .slice(0, -1)
-        .map((part) => part.replace(/\s+/g, ' ').trim().toLowerCase())
-        .filter(Boolean)
+  const getCaret = () => input.selectionStart ?? input.value.length;
+
+  const getCompletedKeys = (caret) => {
+    const activeIndex = getActiveSegmentIndex(input.value, caret);
+    return new Set(
+      getCommaSegments(input.value)
+        .map((segment) => segment.text.replace(/\s+/g, ' ').trim().toLowerCase())
+        .filter((name, index) => Boolean(name) && index !== activeIndex)
     );
+  };
 
   const updateMatches = () => {
-    const query = getActiveCommaQuery(input.value).toLowerCase();
-    const selectedKeys = getCompletedKeys();
+    const caret = getCaret();
+    const query = getActiveCommaQuery(input.value, caret).toLowerCase();
+    const selectedKeys = getCompletedKeys(caret);
 
     if (!query) {
       matches = [];
@@ -375,9 +436,10 @@ function attachCommaAutocomplete(input, suggestions) {
   };
 
   const selectSuggestion = (suggestion) => {
-    input.value = applyCommaSuggestion(input.value, suggestion);
+    const result = applyCommaSuggestion(input.value, suggestion, getCaret());
+    input.value = result.value;
     input.focus();
-    input.setSelectionRange(input.value.length, input.value.length);
+    input.setSelectionRange(result.caret, result.caret);
     hideMenu();
   };
 
@@ -406,12 +468,21 @@ function attachCommaAutocomplete(input, suggestions) {
     menu.innerHTML = '';
   }
 
-  input.addEventListener('input', () => {
+  const refreshMenu = () => {
     activeIndex = 0;
     renderMenu();
-  });
+  };
 
-  input.addEventListener('focus', renderMenu);
+  input.addEventListener('input', refreshMenu);
+  input.addEventListener('focus', refreshMenu);
+  input.addEventListener('click', refreshMenu);
+
+  // Moving the caret into a different word should re-base suggestions on that word.
+  input.addEventListener('keyup', (event) => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      refreshMenu();
+    }
+  });
 
   input.addEventListener('blur', () => {
     window.setTimeout(hideMenu, 120);
@@ -1404,7 +1475,20 @@ async function renderLibraryView(options = {}) {
   }
   if (options.lockStarring) {
     state.filters.starring = options.lockStarring;
-    state.filters.tag = '';
+  }
+
+  const bannerParts = [];
+  if (state.filters.starring) bannerParts.push({ label: 'Starring', value: state.filters.starring });
+  if (bannerParts.length) {
+    const banner = document.createElement('div');
+    banner.className = 'route-banner';
+    banner.innerHTML = bannerParts
+      .map(
+        (part) =>
+          `<span class="route-banner-label">${part.label}:</span> <span class="route-banner-value">${escapeHtml(part.value)}</span>`
+      )
+      .join('<span class="route-banner-sep">·</span>');
+    mainEl.prepend(banner);
   }
 
   bindLibraryToolbar({
@@ -1430,7 +1514,10 @@ async function renderLibraryView(options = {}) {
     const queryString = buildLibraryQuery({
       pageSize: effectivePageSize
     });
-    const [data, tagsData] = await Promise.all([api(`/api/videos?${queryString}`), api('/api/tags')]);
+    const tagsPath = state.filters.starring
+      ? `/api/tags?starring=${encodeURIComponent(state.filters.starring)}`
+      : '/api/tags';
+    const [data, tagsData] = await Promise.all([api(`/api/videos?${queryString}`), api(tagsPath)]);
     if (token !== currentRenderToken) return;
 
     const totalPages = Math.max(1, Math.ceil(data.total / data.pageSize));
@@ -1461,12 +1548,7 @@ async function renderLibraryView(options = {}) {
       tagScroller.appendChild(btn);
     });
 
-    const hints = [];
-    if (state.filters.tag) hints.push(`Tag: ${state.filters.tag}`);
-    if (state.filters.starring) hints.push(`Starring: ${state.filters.starring}`);
-    const routeHint = hints.join(' | ');
-
-    libraryStatus.dataset.baseStatus = `${data.total} videos | page ${state.page}/${totalPages}${routeHint ? ` | ${routeHint}` : ''}`;
+    libraryStatus.dataset.baseStatus = `${data.total} videos | page ${state.page}/${totalPages}`;
     syncLibraryScanningIndicator();
 
     if (data.items.length === 0) {
@@ -1513,7 +1595,7 @@ function createRelatedCard(video) {
   const wrapper = document.createElement('article');
   wrapper.className = 'video-card clickable-card';
   const ratingSummary = Number(video.ratingCount || 0)
-    ? ` · &#9733; ${formatAverageRating(video.averageRating)} (${Number(video.ratingCount || 0)})`
+    ? ` · <span class="rating-summary">&#9733; ${formatAverageRating(video.averageRating)} (${Number(video.ratingCount || 0)})</span>`
     : '';
 
   wrapper.innerHTML = `
@@ -1582,6 +1664,9 @@ async function renderVideoView(videoId) {
 
     mainEl.innerHTML = `
       ${getLibraryToolbarHtml({ includeTagScroller: false })}
+      <div class="video-view ${state.playerPrefs.theaterOn ? 'theater-on' : 'theater-off'}" id="videoView">
+      <div class="video-content">
+        <div class="video-content-main">
       <section class="player-panel">
         <div class="player-shell" id="playerShell">
           <video id="videoEl" src="${escapeHtml(video.mediaUrl)}" preload="metadata"></video>
@@ -1596,8 +1681,9 @@ async function renderVideoView(videoId) {
             <div class="control-row">
               <button id="playPauseBtn">Play</button>
               <button id="fullscreenBtn">Fullscreen</button>
+              <button id="theaterBtn" type="button" title="Theater mode (t)">Theater</button>
               <button id="addMarkerBtn">Add Marker</button>
-              <button id="muteBtn">Mute</button>
+              <button id="muteBtn" type="button" class="icon-btn" aria-label="Mute" title="Mute">${ICON_VOLUME_ON}</button>
               <input id="volumeRange" class="volume-slider" type="range" min="0" max="1" step="0.01" value="1" />
               <span id="timeLabel" class="time-label">00:00 / --:--</span>
             </div>
@@ -1619,14 +1705,14 @@ async function renderVideoView(videoId) {
         </div>
       </section>
 
-      <section class="section-panel" style="margin-top: 1rem;">
+      <section class="section-panel">
         <div class="panel-body">
           <h3 class="section-title">Related Videos</h3>
           <div id="relatedGrid" class="video-grid compact-grid" style="margin-top: .75rem;"></div>
         </div>
       </section>
 
-      <section class="section-panel" style="margin-top: 1rem;">
+      <section class="section-panel">
         <div class="panel-body">
           <h3 class="section-title">Reviews</h3>
           <form id="commentForm" class="form-grid comments-editor" style="margin-top: .7rem;">
@@ -1643,11 +1729,12 @@ async function renderVideoView(videoId) {
           <div class="list-block" id="commentsList">${commentsHtml || '<div class="muted">No reviews yet.</div>'}</div>
         </div>
       </section>
-
-      <section class="section-panel" style="margin-top: 1rem;">
+        </div>
+        <div class="video-content-side">
+      <section class="section-panel">
         <div class="panel-body">
           <h3 class="section-title">Video Metadata</h3>
-          <button id="metaToggleBtn" class="subtle-btn" type="button">Edit Video Data</button>
+          <button id="metaToggleBtn" class="subtle-btn primary" type="button">Edit Video Data</button>
 
           <div id="metaEditor" class="collapsible">
             <form id="metaForm" class="form-grid meta-editor-form">
@@ -1669,6 +1756,15 @@ async function renderVideoView(videoId) {
 
             <hr />
 
+            <div class="form-grid meta-editor-form">
+              <label>Upload Thumbnail
+                <input id="thumbnailUploadInput" type="file" accept="image/png,image/jpeg,image/webp" />
+              </label>
+              <button id="captureThumbnailBtn">Use Current Frame as Thumbnail</button>
+            </div>
+
+            <hr />
+
             <form id="renameForm" class="form-grid meta-editor-form">
               <label>Rename Real File
                 <div class="rename-file-row">
@@ -1678,20 +1774,11 @@ async function renderVideoView(videoId) {
               </label>
               <button type="submit">Rename File</button>
             </form>
-
-            <hr />
-
-            <div class="form-grid meta-editor-form">
-              <label>Upload Thumbnail
-                <input id="thumbnailUploadInput" type="file" accept="image/png,image/jpeg,image/webp" />
-              </label>
-              <button id="captureThumbnailBtn">Use Current Frame as Thumbnail</button>
-            </div>
           </div>
         </div>
       </section>
 
-      <section class="section-panel" style="margin-top: 1rem;">
+      <section class="section-panel">
         <div class="panel-body">
           <h3 class="section-title">Jump Markers</h3>
           <form id="noteForm" class="form-grid jump-marker-form" style="margin-top: .7rem;">
@@ -1713,6 +1800,9 @@ async function renderVideoView(videoId) {
           <div class="list-block" id="notesList">${createNotesListHtml(notes)}</div>
         </div>
       </section>
+        </div>
+      </div>
+      </div>
     `;
 
     bindLibraryToolbar({ navigateToLibrary: true });
@@ -1767,11 +1857,13 @@ async function renderVideoView(videoId) {
 
     state.layout.relatedLimit = null;
 
+    const videoView = document.getElementById('videoView');
     const videoEl = document.getElementById('videoEl');
     const playerShell = document.getElementById('playerShell');
     const playerControls = document.getElementById('playerControls');
     const playPauseBtn = document.getElementById('playPauseBtn');
     const fullscreenBtn = document.getElementById('fullscreenBtn');
+    const theaterBtn = document.getElementById('theaterBtn');
     const addMarkerBtn = document.getElementById('addMarkerBtn');
     const muteBtn = document.getElementById('muteBtn');
     const volumeRange = document.getElementById('volumeRange');
@@ -1812,7 +1904,11 @@ async function renderVideoView(videoId) {
     }
 
     function updateMuteButtonLabel() {
-      muteBtn.textContent = videoEl.muted || videoEl.volume === 0 ? 'Unmute' : 'Mute';
+      const isMuted = videoEl.muted || videoEl.volume === 0;
+      const label = isMuted ? 'Unmute' : 'Mute';
+      muteBtn.innerHTML = isMuted ? ICON_VOLUME_OFF : ICON_VOLUME_ON;
+      muteBtn.setAttribute('aria-label', label);
+      muteBtn.title = label;
     }
 
     function clampProgressRatio(ratio) {
@@ -2208,6 +2304,26 @@ async function renderVideoView(videoId) {
       }
     });
 
+    function applyTheaterMode() {
+      const on = state.playerPrefs.theaterOn;
+      videoView.classList.toggle('theater-on', on);
+      videoView.classList.toggle('theater-off', !on);
+      theaterBtn.classList.toggle('is-active', on);
+      theaterBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+
+    function toggleTheater() {
+      state.playerPrefs.theaterOn = !state.playerPrefs.theaterOn;
+      savePlayerPrefs();
+      applyTheaterMode();
+      // Layout width of the related-video grid changes with theater mode,
+      // so recompute how many related cards fit.
+      scheduleRelatedVideosRefresh();
+    }
+
+    applyTheaterMode();
+    theaterBtn.addEventListener('click', toggleTheater);
+
     volumeRange.addEventListener('input', () => {
       setVolumeLevel(volumeRange.value);
     });
@@ -2274,10 +2390,22 @@ async function renderVideoView(videoId) {
     playerShell.addEventListener('mousemove', showControls);
     playerShell.addEventListener('mouseenter', showControls);
 
+    // Never let player controls take keyboard focus on click, so Space/arrows/f/m/t
+    // always act on the video instead of re-triggering the last-clicked button.
+    playerControls.addEventListener('mousedown', (event) => {
+      if (event.target.closest('button')) event.preventDefault();
+    });
+
     const keyboardHandler = (event) => {
       const targetTag = (event.target?.tagName || '').toLowerCase();
       if (['input', 'textarea', 'select', 'button'].includes(targetTag)) return;
       if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      // Match letter shortcuts by physical key (works regardless of keyboard
+      // layout, IME, or CapsLock), falling back to the produced character so
+      // non-QWERTY physical layouts still trigger on their own 'f'/'m'/'t' key.
+      const matchKey = (code, letter) =>
+        event.code === code || event.key.toLowerCase() === letter;
 
       if (event.key === 'ArrowLeft') {
         event.preventDefault();
@@ -2296,19 +2424,22 @@ async function renderVideoView(videoId) {
         event.preventDefault();
         if (videoEl.paused) requestPlay();
         else videoEl.pause();
-      } else if (event.key.toLowerCase() === 'f') {
+      } else if (matchKey('KeyF', 'f')) {
         event.preventDefault();
         if (document.fullscreenElement) {
           document.exitFullscreen();
         } else {
           playerShell.requestFullscreen();
         }
-      } else if (event.key.toLowerCase() === 'm') {
+      } else if (matchKey('KeyM', 'm')) {
         event.preventDefault();
         videoEl.muted = !videoEl.muted;
         state.playerPrefs.muted = videoEl.muted;
         savePlayerPrefs();
         updateMuteButtonLabel();
+      } else if (matchKey('KeyT', 't')) {
+        event.preventDefault();
+        toggleTheater();
       }
     };
 
@@ -2359,12 +2490,17 @@ async function renderVideoView(videoId) {
     const renameForm = document.getElementById('renameForm');
     renameForm.addEventListener('submit', async (event) => {
       event.preventDefault();
+      const newFileName = document.getElementById('renameInput').value.trim();
+      const confirmed = await showConfirm(
+        'This will rename the actual file on disk. Proceed?',
+        { okLabel: 'Proceed' }
+      );
+      if (!confirmed) return;
+
       try {
         await api(`/api/videos/${videoId}/rename`, {
           method: 'POST',
-          body: JSON.stringify({
-            newFileName: document.getElementById('renameInput').value.trim()
-          })
+          body: JSON.stringify({ newFileName })
         });
         showToast('File renamed');
         rerenderPreservingPlayback();
@@ -2639,6 +2775,66 @@ async function renderVideoView(videoId) {
   }
 }
 
+async function renderTagsView() {
+  mainEl.innerHTML = '<div class="status">Loading tags...</div>';
+
+  try {
+    const data = await api('/api/tags');
+    const items = data.items || [];
+    let sortMode = 'alpha';
+
+    const buildItemsHtml = () => {
+      const sorted = items.slice().sort((a, b) => {
+        if (sortMode === 'count' && b.videoCount !== a.videoCount) {
+          return b.videoCount - a.videoCount;
+        }
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      });
+
+      return (
+        sorted
+          .map(
+            (item) => `
+              <div class="starring-item clickable-card">
+                <a class="video-card-link" href="#/tag/${encodeURIComponent(item.name)}" aria-label="Open ${escapeHtml(item.name)}"></a>
+                <div><strong>#${escapeHtml(item.name)}</strong></div>
+                <div class="muted">${item.videoCount} videos</div>
+              </div>
+            `
+          )
+          .join('') || '<div class="muted">No tags yet.</div>'
+      );
+    };
+
+    mainEl.innerHTML = `
+      <section class="section-panel">
+        <div class="panel-body">
+          <div class="tags-header">
+            <h2 class="section-title">Tags</h2>
+            <select id="tagSortSelect" class="tag-sort-select">
+              <option value="alpha">Name (A–Z)</option>
+              <option value="count">Video Count</option>
+            </select>
+          </div>
+          <div class="starring-list" id="tagsGrid" style="margin-top: .9rem;"></div>
+        </div>
+      </section>
+    `;
+
+    const tagsGrid = document.getElementById('tagsGrid');
+    const tagSortSelect = document.getElementById('tagSortSelect');
+    tagSortSelect.value = sortMode;
+    tagsGrid.innerHTML = buildItemsHtml();
+
+    tagSortSelect.addEventListener('change', () => {
+      sortMode = tagSortSelect.value;
+      tagsGrid.innerHTML = buildItemsHtml();
+    });
+  } catch (error) {
+    mainEl.innerHTML = `<div class="warning error">${escapeHtml(error.message)}</div>`;
+  }
+}
+
 async function renderStarringsView() {
   mainEl.innerHTML = '<div class="status">Loading starrings...</div>';
 
@@ -2648,10 +2844,10 @@ async function renderStarringsView() {
     const itemsHtml = (data.items || [])
       .map(
         (item) => `
-          <div class="starring-item">
+          <div class="starring-item clickable-card">
+            <a class="video-card-link" href="#/starring/${encodeURIComponent(item.name)}" aria-label="Open ${escapeHtml(item.name)}"></a>
             <div><strong>${escapeHtml(item.name)}</strong></div>
             <div class="muted">${item.videoCount} videos</div>
-            <button data-open-starring="${escapeHtml(item.name)}" style="margin-top: .45rem;">Open</button>
           </div>
         `
       )
@@ -2667,13 +2863,6 @@ async function renderStarringsView() {
         </div>
       </section>
     `;
-
-    document.querySelectorAll('[data-open-starring]').forEach((btn) => {
-      btn.addEventListener('click', (event) => {
-        const value = event.currentTarget.getAttribute('data-open-starring');
-        setHash(`#/starring/${encodeURIComponent(value)}`);
-      });
-    });
   } catch (error) {
     mainEl.innerHTML = `<div class="warning error">${escapeHtml(error.message)}</div>`;
   }
@@ -2962,10 +3151,25 @@ async function renderDatabaseView() {
   }
 }
 
+function updateNavActive() {
+  const activeByRoute = {
+    library: 'navLibrary',
+    tag: 'navTags',
+    tags: 'navTags',
+    starring: 'navStarrings',
+    starrings: 'navStarrings'
+  };
+  const activeId = activeByRoute[state.route?.name];
+  ['navLibrary', 'navTags', 'navStarrings'].forEach((id) => {
+    document.getElementById(id)?.classList.toggle('is-active', id === activeId);
+  });
+}
+
 async function renderRoute() {
   currentRenderToken += 1;
   cleanupActiveView();
   state.route = parseHash();
+  updateNavActive();
 
   if (!state.settings) {
     try {
@@ -2983,7 +3187,7 @@ async function renderRoute() {
     stopLibraryScanStatusPolling();
   }
 
-  if (!state.settings.libraryRoot && !['starrings', 'database'].includes(state.route.name)) {
+  if (!state.settings.libraryRoot && !['starrings', 'tags', 'database'].includes(state.route.name)) {
     renderNoLibraryConfigured();
     return;
   }
@@ -3003,6 +3207,11 @@ async function renderRoute() {
     return;
   }
 
+  if (state.route.name === 'tags') {
+    await renderTagsView();
+    return;
+  }
+
   if (state.route.name === 'database') {
     await renderDatabaseView();
     return;
@@ -3016,6 +3225,11 @@ async function renderRoute() {
 
   if (state.route.name === 'starring') {
     state.page = 1;
+    // Entering a different starring starts fresh; staying on the same one keeps
+    // any in-page tag filter so the tag scroller works within a starring view.
+    if (state.filters.starring !== state.route.value) {
+      state.filters.tag = '';
+    }
     await renderLibraryView({ lockStarring: state.route.value });
     return;
   }
@@ -3040,6 +3254,7 @@ function setupGlobalEvents() {
 
   document.getElementById('goLibrary').addEventListener('click', () => goLibraryHome({ reseedRandom: true }));
   document.getElementById('navLibrary').addEventListener('click', () => goLibraryHome());
+  document.getElementById('navTags').addEventListener('click', () => setHash('#/tags'));
   document.getElementById('navStarrings').addEventListener('click', () => setHash('#/starrings'));
   document.getElementById('navDatabase').addEventListener('click', () => setHash('#/database'));
 
