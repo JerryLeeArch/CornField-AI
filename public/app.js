@@ -290,6 +290,176 @@ async function api(path, options = {}) {
   return payload;
 }
 
+async function loadMetadataSuggestionNames(path) {
+  try {
+    const data = await api(path);
+    return (data.items || []).map((item) => item.name).filter(Boolean);
+  } catch (error) {
+    console.warn(`Could not load metadata suggestions from ${path}`, error);
+    return [];
+  }
+}
+
+function getActiveCommaQuery(value) {
+  const parts = value.split(',');
+  return parts[parts.length - 1]?.trim() || '';
+}
+
+function applyCommaSuggestion(value, suggestion) {
+  const completed = value
+    .split(',')
+    .slice(0, -1)
+    .map((part) => part.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const seen = new Set();
+  const nextValues = [...completed, suggestion].filter((name) => {
+    const key = name.toLowerCase();
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+
+  return `${nextValues.join(', ')}, `;
+}
+
+function attachCommaAutocomplete(input, suggestions) {
+  if (!input || !suggestions.length) return;
+
+  const wrapper = input.closest('.metadata-autocomplete');
+  if (!wrapper) return;
+
+  const menu = document.createElement('div');
+  menu.className = 'metadata-autocomplete-menu';
+  menu.hidden = true;
+  wrapper.appendChild(menu);
+
+  let matches = [];
+  let activeIndex = 0;
+
+  const getCompletedKeys = () =>
+    new Set(
+      input.value
+        .split(',')
+        .slice(0, -1)
+        .map((part) => part.replace(/\s+/g, ' ').trim().toLowerCase())
+        .filter(Boolean)
+    );
+
+  const updateMatches = () => {
+    const query = getActiveCommaQuery(input.value).toLowerCase();
+    const selectedKeys = getCompletedKeys();
+
+    if (!query) {
+      matches = [];
+      return;
+    }
+
+    matches = suggestions
+      .filter((name) => !selectedKeys.has(name.toLowerCase()))
+      .map((name) => ({
+        name,
+        startsWith: name.toLowerCase().startsWith(query),
+        includes: name.toLowerCase().includes(query)
+      }))
+      .filter((item) => item.startsWith || item.includes)
+      .sort((a, b) => {
+        if (a.startsWith !== b.startsWith) return a.startsWith ? -1 : 1;
+        return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+      })
+      .slice(0, 8)
+      .map((item) => item.name);
+  };
+
+  const selectSuggestion = (suggestion) => {
+    input.value = applyCommaSuggestion(input.value, suggestion);
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    hideMenu();
+  };
+
+  const renderMenu = () => {
+    updateMatches();
+    activeIndex = Math.min(activeIndex, Math.max(matches.length - 1, 0));
+
+    if (!matches.length) {
+      hideMenu();
+      return;
+    }
+
+    menu.innerHTML = matches
+      .map(
+        (name, index) =>
+          `<button type="button" class="metadata-autocomplete-option ${
+            index === activeIndex ? 'is-active' : ''
+          }" data-index="${index}">${escapeHtml(name)}</button>`
+      )
+      .join('');
+    menu.hidden = false;
+  };
+
+  function hideMenu() {
+    menu.hidden = true;
+    menu.innerHTML = '';
+  }
+
+  input.addEventListener('input', () => {
+    activeIndex = 0;
+    renderMenu();
+  });
+
+  input.addEventListener('focus', renderMenu);
+
+  input.addEventListener('blur', () => {
+    window.setTimeout(hideMenu, 120);
+  });
+
+  input.addEventListener('keydown', (event) => {
+    if (menu.hidden || matches.length === 0) return;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      activeIndex = (activeIndex + 1) % matches.length;
+      renderMenu();
+      return;
+    }
+
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      activeIndex = (activeIndex - 1 + matches.length) % matches.length;
+      renderMenu();
+      return;
+    }
+
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault();
+      selectSuggestion(matches[activeIndex] || matches[0]);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      hideMenu();
+    }
+  });
+
+  menu.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+  });
+
+  menu.addEventListener('click', (event) => {
+    const option = event.target.closest('[data-index]');
+    if (!option) return;
+
+    const suggestion = matches[Number(option.getAttribute('data-index'))];
+    if (suggestion) {
+      selectSuggestion(suggestion);
+    }
+  });
+}
+
 function normalizeScanCount(value) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -1481,8 +1651,16 @@ async function renderVideoView(videoId) {
 
           <div id="metaEditor" class="collapsible">
             <form id="metaForm" class="form-grid meta-editor-form">
-              <label>Tags (comma separated) <input id="metaTags" value="${escapeHtml((video.tags || []).join(', '))}" /></label>
-              <label>Starring (comma separated) <input id="metaStarrings" value="${escapeHtml((video.starrings || []).join(', '))}" /></label>
+              <label>Tags (comma separated)
+                <span class="metadata-autocomplete">
+                  <input id="metaTags" value="${escapeHtml((video.tags || []).join(', '))}" autocomplete="off" />
+                </span>
+              </label>
+              <label>Starring (comma separated)
+                <span class="metadata-autocomplete">
+                  <input id="metaStarrings" value="${escapeHtml((video.starrings || []).join(', '))}" autocomplete="off" />
+                </span>
+              </label>
               <label>View Count <input id="metaViewCount" type="number" min="0" value="${Number(video.viewCount || 0)}" /></label>
               <label>Display Title <input id="metaTitle" value="${escapeHtml(video.displayTitle || '')}" required /></label>
               <label>Date Added <input id="metaCreatedAtDate" type="date" value="${escapeHtml((video.createdAt || '').slice(0, 10))}" /></label>
@@ -2143,6 +2321,13 @@ async function renderVideoView(videoId) {
       const open = metaEditor.classList.toggle('open');
       metaToggleBtn.textContent = open ? 'Close Video Data Editor' : 'Edit Video Data';
     });
+
+    Promise.all([loadMetadataSuggestionNames('/api/tags'), loadMetadataSuggestionNames('/api/starrings')]).then(
+      ([tagSuggestions, starringSuggestions]) => {
+        attachCommaAutocomplete(document.getElementById('metaTags'), tagSuggestions);
+        attachCommaAutocomplete(document.getElementById('metaStarrings'), starringSuggestions);
+      }
+    );
 
     const metaForm = document.getElementById('metaForm');
     metaForm.addEventListener('submit', async (event) => {

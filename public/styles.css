@@ -1171,6 +1171,48 @@ textarea {
   margin-left: auto;
 }
 
+.metadata-autocomplete {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+
+.metadata-autocomplete input {
+  width: 100%;
+}
+
+.metadata-autocomplete-menu {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 0.55rem;
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  padding: 0.25rem;
+}
+
+.metadata-autocomplete-option {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 0.4rem;
+  background: transparent;
+  color: var(--ink);
+  padding: 0.5rem 0.6rem;
+  text-align: left;
+  font: inherit;
+}
+
+.metadata-autocomplete-option:hover,
+.metadata-autocomplete-option.is-active {
+  background: var(--surface);
+  color: var(--accent);
+}
+
 .settings-dialog h2 {
   margin: 0;
 }
