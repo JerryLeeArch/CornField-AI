@@ -510,7 +510,20 @@ function isSameFileIdentity(row, payload) {
   );
 }
 
-function findSingleUnmatchedCandidate(payload, excludedIds = []) {
+function candidateCanMoveToPath(candidate, payload, currentFileIdentitiesByPath) {
+  if (candidate.relativePath === payload.relativePath) {
+    return true;
+  }
+
+  const fileAtCandidatePath = currentFileIdentitiesByPath.get(candidate.relativePath);
+  if (!fileAtCandidatePath) {
+    return true;
+  }
+
+  return !isSameFileIdentity(candidate, fileAtCandidatePath);
+}
+
+function findSingleUnmatchedCandidate(payload, currentFileIdentitiesByPath, excludedIds = []) {
   const excludeSet = new Set(
     excludedIds
       .map((value) => Number(value))
@@ -523,19 +536,31 @@ function findSingleUnmatchedCandidate(payload, excludedIds = []) {
   if (fingerprint) {
     candidates = selectUnmatchedVideosByFingerprintStmt
       .all(fingerprint)
-      .filter((row) => !excludeSet.has(Number(row.id)));
+      .filter((row) => !excludeSet.has(Number(row.id)))
+      .filter((row) => candidateCanMoveToPath(row, payload, currentFileIdentitiesByPath));
   }
 
   if (candidates.length === 0 && Number(payload?.fileSize || 0) > 0 && String(payload?.fileMtime || '').trim()) {
     candidates = selectUnmatchedVideosByFileSignatureStmt
       .all(Number(payload.fileSize), String(payload.fileMtime).trim())
-      .filter((row) => !excludeSet.has(Number(row.id)));
+      .filter((row) => !excludeSet.has(Number(row.id)))
+      .filter((row) => candidateCanMoveToPath(row, payload, currentFileIdentitiesByPath));
+  }
+
+  const samePathCandidates = candidates.filter((row) => row.relativePath === payload.relativePath);
+  if (samePathCandidates.length === 1) {
+    return samePathCandidates[0];
+  }
+
+  const activeCandidates = candidates.filter((row) => !row.isMissing);
+  if (activeCandidates.length === 1) {
+    return activeCandidates[0];
   }
 
   return candidates.length === 1 ? candidates[0] : null;
 }
 
-const syncScannedVideoStmt = db.transaction((payload) => {
+const syncScannedVideoStmt = db.transaction((payload, currentFileIdentitiesByPath) => {
   const activeByPath = selectActiveVideoByRelativePathStmt.get(payload.relativePath);
 
   if (activeByPath && isSameFileIdentity(activeByPath, payload)) {
@@ -552,7 +577,11 @@ const syncScannedVideoStmt = db.transaction((payload) => {
     };
   }
 
-  const candidate = findSingleUnmatchedCandidate(payload, activeByPath ? [activeByPath.id] : []);
+  const candidate = findSingleUnmatchedCandidate(
+    payload,
+    currentFileIdentitiesByPath,
+    activeByPath ? [activeByPath.id] : []
+  );
   let missingCount = 0;
 
   if (candidate) {
@@ -627,39 +656,63 @@ export async function scanLibrary(libraryRoot, options = {}) {
   const startAt = isoNow();
   const scanSessionId = createScanSessionId(startAt);
   const files = await walkVideoFiles(root);
+  const scannedFiles = [];
   let autoThumbnailsCreated = 0;
   let addedCount = 0;
   let missingCount = 0;
   logScanInfo('started', `session=${scanSessionId} files=${files.length}`);
+
+  for (const file of files) {
+    const fileStat = await fs.stat(file.absPath);
+    const contentFingerprint = await buildFileFingerprint(file.absPath, fileStat).catch(() => null);
+    const fileMtime = normalizeFileMtime(fileStat);
+
+    scannedFiles.push({
+      ...file,
+      fileStat,
+      fileSize: Math.max(0, Math.floor(Number(fileStat.size || 0))),
+      fileMtime,
+      contentFingerprint
+    });
+  }
+
+  const currentFileIdentitiesByPath = new Map(
+    scannedFiles.map((file) => [
+      file.relative,
+      {
+        contentFingerprint: file.contentFingerprint,
+        fileSize: file.fileSize,
+        fileMtime: file.fileMtime
+      }
+    ])
+  );
+
   onProgress?.({
     phase: 'processing',
     scannedCount: 0,
     totalCount: files.length
   });
 
-  for (const [index, file] of files.entries()) {
-    const fileStat = await fs.stat(file.absPath);
+  for (const [index, file] of scannedFiles.entries()) {
     const probed = await probeVideo(file.absPath);
     const displayTitle = path.parse(file.fileName).name;
     const now = isoNow();
-    const contentFingerprint = await buildFileFingerprint(file.absPath, fileStat).catch(() => null);
-    const fileMtime = normalizeFileMtime(fileStat);
 
     const scanResult = syncScannedVideoStmt({
       relativePath: file.relative,
       fileName: file.fileName,
       displayTitle,
-      originalCreatedAt: fileStat.birthtime?.toISOString?.() || fileStat.mtime.toISOString(),
+      originalCreatedAt: file.fileStat.birthtime?.toISOString?.() || file.fileStat.mtime.toISOString(),
       duration: probed.duration,
       width: probed.width,
       height: probed.height,
       qualityBucket: probed.qualityBucket,
       scanSessionId,
-      fileSize: Math.max(0, Math.floor(Number(fileStat.size || 0))),
-      fileMtime,
-      contentFingerprint,
+      fileSize: file.fileSize,
+      fileMtime: file.fileMtime,
+      contentFingerprint: file.contentFingerprint,
       now
-    });
+    }, currentFileIdentitiesByPath);
     addedCount += Number(scanResult.addedCount || 0);
     missingCount += Number(scanResult.missingCount || 0);
 

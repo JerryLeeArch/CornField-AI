@@ -75,6 +75,7 @@ const state = {
   },
   libraryRandomSeed: Date.now(),
   pendingVideoPlayback: null,
+  libraryScanCheckInProgress: false,
   libraryScanInProgress: false,
   libraryScanScannedCount: null,
   libraryScanTotalCount: null
@@ -550,10 +551,21 @@ function getLibraryScanMessage() {
   return 'Scanning library...';
 }
 
+function syncLibraryScanControls() {
+  const isScanning = state.libraryScanInProgress;
+  const isChecking = state.libraryScanCheckInProgress;
+
+  scanNowBtn.disabled = isScanning || isChecking;
+  scanNowBtn.textContent = isScanning ? 'Scanning...' : isChecking ? 'Checking...' : 'Scan Library';
+  scanProceedBtn.disabled = isScanning;
+  scanCancelBtn.disabled = isScanning;
+}
+
 function applyLibraryScanStatus(status = {}) {
   state.libraryScanInProgress = Boolean(status?.inProgress);
   state.libraryScanScannedCount = normalizeScanCount(status?.scannedCount);
   state.libraryScanTotalCount = normalizeScanCount(status?.totalCount);
+  syncLibraryScanControls();
   syncLibraryScanningIndicator();
 }
 
@@ -3439,10 +3451,6 @@ function setupGlobalEvents() {
     scheduleLibraryScanStatusPolling(200);
 
     try {
-      scanNowBtn.disabled = true;
-      scanProceedBtn.disabled = true;
-      scanCancelBtn.disabled = true;
-      scanNowBtn.textContent = 'Scanning...';
       const scanResult = await api('/api/library/scan', {
         method: 'POST',
         body: JSON.stringify({ libraryRoot: finalRoot })
@@ -3469,10 +3477,7 @@ function setupGlobalEvents() {
     } finally {
       await refreshLibraryScanStatus({ silent: true });
       scheduleLibraryScanStatusPolling();
-      scanNowBtn.disabled = false;
-      scanProceedBtn.disabled = false;
-      scanCancelBtn.disabled = false;
-      scanNowBtn.textContent = 'Scan Library';
+      syncLibraryScanControls();
     }
   };
 
@@ -3484,8 +3489,8 @@ function setupGlobalEvents() {
     }
 
     try {
-      scanNowBtn.disabled = true;
-      scanNowBtn.textContent = 'Checking...';
+      state.libraryScanCheckInProgress = true;
+      syncLibraryScanControls();
       const preview = await api('/api/library/scan/preview', {
         method: 'POST',
         body: JSON.stringify({ libraryRoot: root })
@@ -3506,13 +3511,15 @@ function setupGlobalEvents() {
     } catch (error) {
       showToast(error.message, true);
     } finally {
-      scanNowBtn.disabled = false;
-      scanNowBtn.textContent = 'Scan Library';
+      state.libraryScanCheckInProgress = false;
+      syncLibraryScanControls();
     }
   });
 
   scanProceedBtn.addEventListener('click', async () => {
-    await runLibraryScan(state.pendingScanRoot || libraryRootInput.value.trim());
+    const root = state.pendingScanRoot || libraryRootInput.value.trim();
+    hideScanPreview();
+    await runLibraryScan(root);
   });
 
   scanCancelBtn.addEventListener('click', () => {
