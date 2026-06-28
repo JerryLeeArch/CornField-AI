@@ -168,6 +168,18 @@ button:active {
   transform: translateY(1px);
 }
 
+button:disabled,
+button:disabled:hover,
+button:disabled:active {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+button.primary:disabled:hover {
+  background: var(--accent);
+}
+
 .settings-btn {
   width: 2.2rem;
   height: 2.2rem;
