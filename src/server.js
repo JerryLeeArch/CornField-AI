@@ -27,7 +27,6 @@ import {
   ensureTimelinePreviewManifest,
   timelinePreviewRoot
 } from './timeline-previews.js';
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..');
@@ -202,7 +201,7 @@ function isPathInsideRoot(rootPath, candidatePath) {
   return relativePath === '' || (!relativePath.startsWith('..') && !path.isAbsolute(relativePath));
 }
 
-async function selectFolderFromFinder(initialPath = '') {
+async function selectFolderFromFinder(initialPath = '', prompt = 'Select your video library folder') {
   if (process.platform !== 'darwin') {
     return null;
   }
@@ -223,7 +222,7 @@ async function selectFolderFromFinder(initialPath = '') {
   }
 
   const script = [
-    `set chosenFolder to choose folder with prompt ${toAppleScriptString('Select your video library folder')}${defaultLocationClause}`,
+    `set chosenFolder to choose folder with prompt ${toAppleScriptString(prompt)}${defaultLocationClause}`,
     'POSIX path of chosenFolder'
   ];
 
@@ -238,7 +237,7 @@ async function selectFolderFromFinder(initialPath = '') {
   }
 }
 
-async function selectFolderFromWindows(initialPath = '') {
+async function selectFolderFromWindows(initialPath = '', prompt = 'Select your video library folder') {
   if (process.platform !== 'win32') {
     return null;
   }
@@ -261,7 +260,7 @@ async function selectFolderFromWindows(initialPath = '') {
   const script = [
     'Add-Type -AssemblyName System.Windows.Forms',
     '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog',
-    `$dialog.Description = ${toPowerShellSingleQuotedString('Select your video library folder')}`,
+    `$dialog.Description = ${toPowerShellSingleQuotedString(prompt)}`,
     '$dialog.ShowNewFolderButton = $false',
     selectedPathLine,
     '$result = $dialog.ShowDialog()',
@@ -282,13 +281,13 @@ async function selectFolderFromWindows(initialPath = '') {
   }
 }
 
-async function selectFolderFromSystemDialog(initialPath = '') {
+async function selectFolderFromSystemDialog(initialPath = '', prompt = 'Select your video library folder') {
   if (process.platform === 'darwin') {
-    return selectFolderFromFinder(initialPath);
+    return selectFolderFromFinder(initialPath, prompt);
   }
 
   if (process.platform === 'win32') {
-    return selectFolderFromWindows(initialPath);
+    return selectFolderFromWindows(initialPath, prompt);
   }
 
   const error = new Error('Folder picker is currently available on macOS and Windows only. Enter the path manually instead.');
@@ -744,7 +743,10 @@ app.get('/api/settings', async () => {
 
 app.post('/api/system/select-folder', async (request, reply) => {
   try {
-    const selectedPath = await selectFolderFromSystemDialog(request.body?.initialPath || '');
+    const selectedPath = await selectFolderFromSystemDialog(
+      request.body?.initialPath || '',
+      String(request.body?.prompt || 'Select your video library folder')
+    );
     return {
       ok: true,
       cancelled: !selectedPath,
